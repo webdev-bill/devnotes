@@ -192,3 +192,200 @@ open-source, with no licensing fees or usage-based charges. Only the underlying 
 - Powering off a Droplet does NOT stop billing — resources are still reserved.
   Must fully **destroy** the Droplet to stop being charged.
 - DigitalOcean spend alerts are notifications only, not hard caps.
+
+---
+
+# Application Development Log
+
+> Local application development (Laravel backend, React frontend, Docker Compose dev stack).
+> Same rules as above: factual, specific, mistakes included — this is rebuild reference and
+> future blog-post raw material, not a sanitized changelog.
+
+## 2026-08-26 — Git Identity, SSH Config, and Line-Ending Issues Across WSL/Windows
+
+The local dev environment spans two separate shells operating on the same repo: Windows
+Git Bash (MSYS) and a WSL2 Ubuntu distro, both reaching the project through the same
+`\\wsl.localhost\Ubuntu\...` filesystem path. They do **not** share `~/.ssh` or global git
+config, which caused three separate issues in one session.
+
+**Issue 1 — commit failed with no git identity in WSL:**
+
+```
+Author identity unknown
+*** Please tell me who you are.
+fatal: empty ident name (for <redacted-hostname>) not allowed
+```
+
+WSL's git had never been configured with a name/email (Windows' git config is entirely
+separate). Fixed by checking the Windows-side identity and mirroring it locally in the
+repo (not `--global`), since `.git/config` lives on the shared filesystem and applies no
+matter which shell touches the repo afterward:
+
+```bash
+# checked on the Windows side first:
+git config user.name   # → Drew Swift
+git config user.email  # → <redacted-personal-email>
+
+# then set locally (not --global) from WSL:
+git config user.name "Drew Swift"
+git config user.email "<redacted-personal-email>"
+```
+
+**Issue 2 — push failed from WSL after the commit succeeded:**
+
+```
+ssh: Could not resolve hostname github-devnotes: Name or service not known
+fatal: Could not read from remote repository.
+```
+
+The remote is `git@github-devnotes:webdev-bill/devnotes.git` — `github-devnotes` is a
+custom `Host` alias defined in **Windows'** `~/.ssh/config` (pointing at a
+project-specific deploy key), but WSL has its own separate `~/.ssh/config` without that
+alias. Rather than duplicating SSH config into WSL, the fix was simply to run `git push`
+from the Windows Git Bash tool instead — commits made from WSL are immediately visible
+there since it's the same `.git` directory on the same underlying filesystem, just
+accessed from a different shell.
+
+- **Decision:** commit/push using whichever shell already has the correct SSH config for
+  the remote in question (Windows Git Bash, for this repo), rather than re-configuring
+  SSH identically in both environments. Git identity only needed fixing once (shared via
+  `.git/config`); SSH access did not transfer the same way (lives in each shell's own
+  `~/.ssh`).
+
+**Issue 3 — unintended line-ending diffs:**
+
+After moving files around from both shells, `git status` showed `LICENSE` and
+`README.md` as modified with a pure LF→CRLF diff — every line changed, no actual content
+different. Cause: Windows git defaults to `core.autocrlf=true` (normalizes LF→CRLF on
+checkout) while WSL git does not, so touching the same working tree from both sides can
+silently rewrite line endings on files nobody meant to edit. Fixed by discarding the
+unintended changes before committing anything else:
+
+```bash
+git checkout -- LICENSE README.md
+```
+
+**Issue 4 — a cleanup one-liner nearly unstaged the entire repo:**
+
+While removing a stray Windows `Zone.Identifier` artifact file (a leftover "downloaded
+from the internet" marker, not real content) from the git index, this pipeline was run:
+
+```bash
+git ls-files -z | grep -a "Zone" | xargs -0 -I{} git rm --cached "{}"
+```
+
+`grep` without `-z`/`--null-data` doesn't treat NUL-separated input as multiple lines —
+it matched "Zone" somewhere in the whole null-delimited blob and passed the *entire*
+file list through to `xargs`, which dutifully ran `git rm --cached` on every tracked
+file in the repo. Caught before committing (working tree files were untouched, since
+`--cached` only affects the index) and fixed immediately with:
+
+```bash
+git reset   # restores the index to match HEAD, undoes the mass --cached removal
+```
+
+- **Lesson:** never pipe `git ls-files -z` through plain `grep` — either add `grep -z`
+  or, for a single obviously-named file, just target the exact path directly instead of
+  scripting an index-wide filter.
+
+## 2026-08-26 — Data Models and API Design: Notes, Tags, Blog Posts + Sanctum Auth
+
+Designed and implemented the core data model and REST API for notes/snippets, tags, and
+blog posts, following a review-before-code workflow for both the schema and the endpoint
+list (proposed each in chat, waited for explicit approval, then implemented).
+
+### Schema decisions
+
+- **`notes` unifies notes and snippets** via a single nullable `language` column instead
+  of a separate `type` enum — a snippet is just a note with a language attached; no
+  content is created by having both fields.
+- **Tags are global**, not scoped per user — simplest model for a personal tool; still
+  doesn't block adding more users later, it just means users would share a tag namespace.
+- **`blog_posts.published_at` (nullable timestamp) is the only draft/published signal** —
+  no separate `status` column. `null` = draft, a past timestamp = published, a future
+  timestamp = scheduled (`published_at <= now()` in the query scope). Avoids two fields
+  that could drift out of sync.
+- **`notes.visibility` (public/private) also covers the "draft" concept** — a private
+  note is functionally a draft (visible only to the owner). No third state was added.
+- **`visibility` is a plain `string` column**, cast to a native PHP backed enum
+  (`App\Enums\NoteVisibility`) on the Eloquent model — not a Postgres-native enum/check
+  constraint, which is painful to alter later (Postgres only supports `ADD VALUE`, no
+  easy remove/reorder).
+- **`user_id` is deliberately excluded from each model's fillable attributes.** Ownership
+  is only ever set via `$user->notes()->create(...)` / `$user->blogPosts()->create(...)`,
+  never mass-assigned from request input — this is what makes "don't hardcode single-user
+  assumptions" actually true: nothing needs to change to support more users later, and a
+  request body can never spoof ownership.
+- **Postgres-specific:** all markdown content columns use plain `text`, not `longText()`
+  — Postgres has no MySQL-style TEXT/MEDIUMTEXT/LONGTEXT tiering, so the distinction
+  Laravel's migration builder offers is a MySQL-only concern.
+- `note_tag` pivot uses a composite primary key (`note_id`, `tag_id`), no surrogate `id`
+  — pure join table, Laravel's alphabetical naming convention.
+
+Migrations verified live via `php artisan tinker` inside the running container (enum
+casting, the `belongsToMany` tag relationship, and both the `public()`/`published()`
+query scopes) before being committed.
+
+### API structure decision
+
+Every resource is split into **two separate controllers** rather than one controller
+with auth-conditional logic:
+
+- `Api\NoteController` / `Api\BlogPostController` — unauthenticated, read-only, base
+  query always starts `public()`/`published()`-scoped.
+- `Api\My\NoteController` / `Api\My\BlogPostController` — behind `auth:sanctum`, full
+  CRUD, scoped to the caller's own records via Policies.
+
+Rationale (confirmed explicitly before implementing): this makes it structurally
+impossible for a future refactor to leak private data through the public endpoint —
+there's no `if (auth)` branch that could be broken by a later change, because the public
+controller literally has no code path to unscoped data. Filters (`search=`, `tag=`) are
+chained onto the already-scoped query, so they can only narrow results, never widen them
+past what the base scope already allows.
+
+- Auth: `laravel/sanctum` installed via Composer, migration published via
+  `php artisan vendor:publish --provider="Laravel\Sanctum\SanctumServiceProvider"`,
+  `HasApiTokens` added to `User`. Plain bearer-token flow (`POST /api/login` issues a
+  token, `POST /api/my/logout` revokes the current one) — not Sanctum's SPA/cookie flow,
+  since backend and frontend are separately deployed services. No registration endpoint:
+  single owner, so a public sign-up route would only be extra attack surface.
+- Ownership enforcement via Laravel Policies (`NotePolicy`, `BlogPostPolicy`),
+  auto-discovered by naming convention — no manual registration needed.
+- Validation via per-action `FormRequest` classes; `UpdateNoteRequest` and
+  `UpdateBlogPostRequest` call the relevant policy's `update` check directly from their
+  `authorize()` method.
+
+### Gotcha: route-model-binding parameter names must match exactly
+
+Laravel's implicit route-model binding matches by the **exact PHP parameter name**
+against the route's URI placeholder — not by type alone. `Route::apiResource` for a
+`blog-posts` resource auto-generates the placeholder `{blog_post}` (hyphens become
+underscores). Controllers and `FormRequest`s were first written with camelCase
+`$blogPost`, which would have silently failed to bind (the parameter would just stay
+`null`/unresolved). Caught before committing and fixed by standardizing on `$blog_post`
+everywhere — controllers, route closures, and `$this->route('blog_post')` calls inside
+`FormRequest::authorize()` — to match Laravel's own resource-route naming convention.
+
+### Live verification (not just code review)
+
+Ran the full stack (`docker compose up -d db backend`) and exercised the real HTTP API
+with `curl` before committing:
+
+- Login success and failure (wrong password → `401` with JSON body).
+- Created a private note and a public note (with tags, exercising find-or-create).
+- Confirmed the public `/api/notes` endpoint never returns the private note — including
+  under `?search=` and `?tag=` filters.
+- Confirmed a draft blog post 404s on its public slug URL, then appears once
+  `published_at` is set to a past timestamp.
+- Created a second user and confirmed `403` (not `404`) when it tries to view, update, or
+  delete the first user's private note or blog post — proves the Policy checks work
+  across users, not just against an unauthenticated request.
+- Confirmed logout actually revokes the token (subsequent authenticated request → `401`).
+- Deleted all test users/notes/tags/posts via Tinker afterward so the dev database
+  stayed clean.
+
+**Minor tooling gotcha hit again during this verification:** inlining `curl` commands
+with embedded JSON across three nested shells (Bash tool → `wsl.exe` → inner `bash -lc`)
+mangled quoting and silently dropped output. Fixed by writing the test flow as a
+standalone `.sh` script file and executing that file directly, instead of inlining
+multi-command strings across shell layers.
