@@ -12,7 +12,13 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // This app has no web/HTML routes at all — there is no "login" route
+        // to redirect a guest to. Without this, Laravel's default guest
+        // redirect falls back to `route('login')` whenever a request doesn't
+        // send `Accept: application/json` (e.g. a bare curl call or a
+        // browser navigating to the URL directly), which throws
+        // RouteNotFoundException and surfaces as a 500 instead of a 401.
+        $middleware->redirectGuestsTo(fn () => null);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
