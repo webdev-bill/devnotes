@@ -138,6 +138,9 @@ reboot
 - [ ] Set up GitHub Actions for build + deploy
 - [ ] Configure Postgres backups to S3-compatible storage (e.g. Backblaze B2)
 - [ ] Write DEPLOYMENT.md — a from-scratch rebuild guide
+- [ ] Add pagination controls to the notes list pages (`/notes` and `/my/notes`)
+      — deliberately deferred in the 2026-08-26 notes/blog pages session, both
+      currently only render the first page of API results
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -587,3 +590,118 @@ skipping verification or falsely claiming a browser test happened:
 watching the redirect + nav state change happen. Left the Docker stack running with a
 test account (`andrew@example.com` / a test password) specifically so this could be
 checked visually afterward — that's the one piece automated checks can't stand in for.
+
+## 2026-08-26 — Real Notes Pages: List, Detail, Dashboard, Create/Edit/Delete
+
+Replaced the `/notes`, `/notes/:id`, and `/my/notes` (+ create/edit) placeholders with
+real pages backed by the actual API, following the same propose-then-build flow as the
+schema/endpoint sessions.
+
+### Component breakdown that shipped
+
+- `NoteCard` (presentational only — title, language badge, tags) reused by both the
+  public list and the dashboard; each page decides what wraps it (a `<Link>` publicly,
+  extra chrome — visibility badge, edit/delete — on the dashboard).
+- `TagPills` extracted out of `NoteCard` because `NoteDetail` needed the exact same tag
+  rendering.
+- `VisibilityBadge` — dashboard-only, deliberately not shared with the public list since
+  everything there is public by definition.
+- `NoteForm` (the actual form) is shared between create and edit; the two routes are thin
+  page wrappers — the edit wrapper fetches the existing note first and passes it in,
+  delete lives on the page (not the form) since it's a destructive action, not a field.
+- `useFetch` hook + `LoadingState`/`ErrorState` components — the shared loading/error
+  pattern from the proposal, now actually in use across three pages, ready to reuse for
+  blog pages next.
+
+### `react-markdown` — the CLAUDE.md constraint's first real application
+
+Rendered note content with `<ReactMarkdown>{note.content}</ReactMarkdown>` and nothing
+else — no `rehype-raw`, no plugins that enable raw HTML passthrough. Added an inline
+comment directly above the usage in `NoteDetail.tsx` (not just relying on someone having
+read `CLAUDE.md`) spelling out why it must stay that way, since this is user-authored
+content rendered for arbitrary public visitors — exactly the scenario the localStorage
+token-storage decision was betting against.
+
+Also had to install `@tailwindcss/typography` and add `@plugin "@tailwindcss/typography";`
+to `index.css` — without it, Tailwind's `prose` class (used to style the rendered
+markdown) is just an inert class name with zero effect. Caught this before it shipped
+silently broken by actually reading the generated CSS bundle size in the build output.
+
+### Gotcha (recurrence): stale anonymous volume survives a rebuild
+
+Hit the anonymous-volume issue from the previous session again, in a slightly different
+shape: added `react-markdown` and `@tailwindcss/typography`, ran `docker compose build
+frontend` (image now has them baked in via the Dockerfile's `RUN npm install`), then
+`docker compose up -d` — and `tsc` still failed with "Cannot find module 'react-markdown'"
+inside the running container. Cause: the frontend container's anonymous `node_modules`
+volume had already been created in an earlier `up` this session, and Compose reuses an
+existing anonymous volume for a service by default rather than re-initializing it from a
+freshly rebuilt image — volume-from-image initialization only happens for a volume that's
+genuinely new. Fix:
+
+```bash
+docker compose up -d --force-recreate --renew-anon-volumes frontend
+```
+
+**Takeaway:** `docker compose build` alone is never enough after adding a package if the
+service's container (and its anonymous volume) already existed from a prior `up` in the
+same session — `--renew-anon-volumes` (or tearing the stack down first) is required to
+actually pick up the new dependency.
+
+### Backend bug found via frontend integration testing: 500 instead of 401
+
+While testing the route guard's server-side backing (`GET /api/my/notes` with no auth),
+a bare `curl` call with no `Accept` header returned a raw `500`, not the expected `401`.
+Root cause (from `storage/logs/laravel.log`): Laravel's `Authenticate` middleware builds
+its guest-redirect target as `$request->expectsJson() ? null : route('login')` — and this
+app has no `web.php`, no HTML routes, and no route named `login` at all. Any request that
+doesn't send `Accept: application/json` (curl by default, Postman by default, a browser
+navigating to the URL directly) hits `expectsJson() === false`, and `route('login')`
+throws `RouteNotFoundException` while the middleware is still constructing the exception
+it was about to throw — a 500 masking what should be a 401.
+
+**This never affected the real frontend** — `api/client.ts` unconditionally sends
+`Accept: application/json` on every request, so `expectsJson()` is always true in
+practice, which is exactly why this had gone uncaught through the entire Sanctum test
+pass. Found it only because this session's test script made one deliberately bare
+`curl` call (no headers at all) specifically to check the guard's server-side behavior.
+
+**Fix**, in `bootstrap/app.php`:
+
+```php
+->withMiddleware(function (Middleware $middleware): void {
+    $middleware->redirectGuestsTo(fn () => null);
+})
+```
+
+Since there is no login page anywhere in this API-only app, guests should never be
+redirected — always fall through to the JSON `401`. Verified with the no-header curl
+case, a `text/html`-accepting case (simulating a browser typed-in-address-bar visit), and
+the normal `Accept: application/json` case — all three now return `401`; public endpoints
+and `/up` unaffected.
+
+**Lesson:** an API-only Laravel app should treat this as day-one hardening, not something
+to discover later — any Sanctum-protected route will have this exact failure mode until
+`redirectGuestsTo` (or equivalent) is set, and it's easy to miss if every test client
+happens to always send `Accept: application/json` like ours did.
+
+### Verification
+
+Full build (`tsc -b && vite build`) and lint (`oxlint`) clean — one accepted warning
+remains (the `AuthContext` fast-refresh nitpick from last session, still not worth
+splitting into 3 files). Live-tested the complete flow against the running containers,
+matching exactly what each page's code calls: login, create a public note and a private
+note (with tags, exercising find-or-create), confirmed the public list and search/tag
+filters never surface the private note, confirmed the public single-note endpoint 404s
+for a private note by id, confirmed the dashboard sees both notes, confirmed the
+previously-broken unauthenticated check now correctly 401s, edited a note, deleted both,
+confirmed the deletion stuck. Left the dashboard empty afterward and the test account
+in place so the actual create-note form UI could be exercised firsthand.
+
+**Still not verified — same gap as last session:** no browser automation available, so
+the actual DOM-level behavior (does the route guard really redirect to `/login` when you
+type `/my/notes` into the address bar unauthenticated, does the search input/tag dropdown
+actually update the list on screen, does the markdown render correctly) hasn't been
+watched happen by anyone. Server-side, the guard's `401` is confirmed solid regardless of
+headers sent (see the bug above) — but "does the client-side redirect component actually
+fire" is a real, distinct claim I have not verified.
