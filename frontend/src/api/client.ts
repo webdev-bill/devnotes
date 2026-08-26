@@ -16,6 +16,8 @@ type RequestOptions = {
   body?: unknown
   /** Attach the stored Sanctum token as an Authorization header. */
   auth?: boolean
+  /** Query string params — undefined/empty-string values are omitted. */
+  params?: Record<string, string | undefined>
 }
 
 /**
@@ -24,7 +26,7 @@ type RequestOptions = {
  * bearer token.
  */
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, auth = false } = options
+  const { method = 'GET', body, auth = false, params } = options
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -41,7 +43,13 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     }
   }
 
-  const response = await fetch(`${API_URL}${path}`, {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value) query.set(key, value)
+  }
+  const queryString = query.toString()
+
+  const response = await fetch(`${API_URL}${path}${queryString ? `?${queryString}` : ''}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
