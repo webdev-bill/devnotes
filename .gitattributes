@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings on every platform — a CRLF-corrupted
+# shebang line breaks execution on Windows' bundled Git Bash / WSL / any Unix shell.
+.githooks/* text eol=lf
+*.sh text eol=lf

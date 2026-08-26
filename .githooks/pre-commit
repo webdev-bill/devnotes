@@ -1,0 +1,28 @@
+#!/bin/sh
+# Blocks a commit if gitleaks finds secret-shaped content in the staged diff.
+#
+# This hook is tracked in the repo (not .git/hooks/, which git never syncs),
+# activated per-clone via:
+#   git config core.hooksPath .githooks
+#
+# See docs/git-workflow.md for what this catches, how to install gitleaks,
+# and how to bypass it for a genuine false positive.
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks is not installed or not on PATH." >&2
+    echo "Install it, then retry the commit. See docs/git-workflow.md for install instructions." >&2
+    echo "(Not skipping the scan — a missing scanner should not silently allow a leak through.)" >&2
+    exit 1
+fi
+
+if ! gitleaks protect --staged --redact -v; then
+    echo "" >&2
+    echo "pre-commit: gitleaks flagged something in the staged changes above — commit blocked." >&2
+    echo "If this is a genuine false positive, see docs/git-workflow.md for how to bypass." >&2
+    exit 1
+fi
