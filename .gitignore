@@ -1,0 +1,16 @@
+# --- Environment files (never commit secrets) ---
+.env
+
+# --- Laravel (backend/) ---
+backend/vendor/
+backend/storage/*.key
+backend/bootstrap/cache/*
+!backend/bootstrap/cache/.gitignore
+
+# --- React / Node (frontend/) ---
+frontend/node_modules/
+frontend/dist/
+
+# --- General ---
+.DS_Store
+*.log

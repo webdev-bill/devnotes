@@ -1,0 +1,72 @@
+# Local development stack. Run `docker compose up --build` from the repo
+# root. Values in ${...} come from the root .env file (copy .env.example
+# to .env first) — Compose substitutes them automatically, no extra config
+# needed.
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      # The Postgres image's own var names (POSTGRES_*) differ from
+      # Laravel's (DB_*); we map them here so both sides read from the
+      # same root .env values instead of duplicating them.
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # Named volume so database data survives `docker compose down`
+      # (it's only destroyed by `docker compose down -v`).
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      # Bind mount so edits to backend/ on the host are picked up
+      # immediately, without rebuilding the image.
+      - ./backend:/var/www/html
+    ports:
+      - "${APP_PORT}:8000"
+    environment:
+      # Overrides whatever is in backend/.env, so the container always
+      # talks to the "db" service using the same credentials it was
+      # created with — even if backend/.env drifts out of sync.
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: ${DB_DATABASE}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      # Anonymous volume that shadows the bind mount above for just this
+      # one path, so the container's own node_modules/ (built for Linux)
+      # isn't overwritten by the host's node_modules/ (built for your OS).
+      - /app/node_modules
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    environment:
+      VITE_API_URL: ${VITE_API_URL}
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
