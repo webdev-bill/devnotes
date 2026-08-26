@@ -389,3 +389,106 @@ with embedded JSON across three nested shells (Bash tool → `wsl.exe` → inner
 mangled quoting and silently dropped output. Fixed by writing the test flow as a
 standalone `.sh` script file and executing that file directly, instead of inlining
 multi-command strings across shell layers.
+
+## 2026-08-26 — Full Secrets Audit + gitleaks Pre-Commit Hook
+
+Ran a full audit of everything ever committed to the repo (all 7 commits, not just
+current tree state) for secrets/confidential info, then set up an automated safeguard
+against it happening again.
+
+### Audit method
+
+Checked git history three ways, cross-checking each against the others:
+
+1. Filename search for secret-shaped paths (`*.env` excluding `*.env.example`, `*.pem`,
+   `*.key`, etc.) — nothing found.
+2. Manual regex sweep of `git log -p --all` output for AWS key patterns, private key
+   headers, GitHub/Slack/Stripe token formats, password assignments, real IPs, and real
+   emails/domains — every hit individually verified in context (see findings below).
+3. `gitleaks detect --source . --log-opts="--all"` as an independent cross-check against
+   the same history using its own (more sophisticated, entropy-aware) rule set —
+   agreed with the manual sweep: no leaks found.
+
+### Findings
+
+- **No API keys, tokens, passwords, DB credentials, private keys, or cloud credentials**
+  anywhere in history. No `.env` file was ever committed — only `.env.example` files
+  with placeholder values (`changeme`, empty AWS key fields).
+- Dozens of email-address false positives, all public open-source package maintainer
+  emails baked into `composer.lock` (Taylor Otwell, Symfony contributors, etc.) — normal
+  for any Laravel project, not specific to this one.
+- IP-address-shaped false positives were numeric coordinates inside
+  `frontend/public/icons.svg`'s SVG path data, not real IPs.
+- **Two real findings**, both self-introduced while writing the previous runbook entry
+  (the git-identity session log): a personal Gmail address and a laptop hostname, quoted
+  verbatim in `docs/server-setup-runbook.md` while documenting a `git config` command and
+  a git error message, in commit `f9941b0`.
+
+### Remediation
+
+Since `f9941b0` was the current tip of `main` (not buried under later commits), fixing it
+only required amending that one commit — not a multi-commit rebase like the earlier
+author-identity situation:
+
+```bash
+# edited the two lines in docs/server-setup-runbook.md to placeholders, then:
+git add docs/server-setup-runbook.md
+git commit --amend --no-edit
+git push --force origin main
+```
+
+Verified the fix three ways before considering it done:
+- `git log --format="%an <%ae> - %s"` on both local and `origin/main` — all 7 commits
+  still present, correct messages, correct order, authorship intact.
+- `git log -p --all | grep` for both redacted strings — zero matches, on both local and
+  remote history.
+- `git rev-list --objects --all | git cat-file --batch-check` — confirmed neither string
+  appears in *any* object reachable from any ref, not just in the diff view.
+
+**Note on completeness:** `git commit --amend` makes the old blob unreachable but doesn't
+immediately erase it from the local `.git` object database. Ran
+`git reflog expire --expire=now --all && git gc --prune=now --aggressive` afterward, then
+confirmed with `git fsck --unreachable --no-reflogs` (empty output) that the old object is
+actually gone locally, not just unreferenced. GitHub's backend may retain the old object
+briefly until its own garbage collection runs — there's no user-facing "purge" command —
+but it's unreachable from any ref, so no clone/browse/fork will ever surface it. Acceptable
+residual for what leaked here (a personal email + hostname, not a credential); a real
+credential leak would warrant contacting GitHub support to force an immediate purge.
+
+### gitleaks pre-commit hook
+
+Chose gitleaks over git-secrets: single static binary (no runtime dependency), actively
+maintained, solid default rule set (regex + entropy-based), and a `protect --staged` mode
+that's a natural fit for a pre-commit hook (scans only the staged diff, not the whole
+repo, so it stays fast).
+
+- Installed via `winget install --id Gitleaks.Gitleaks -e` (Windows).
+- Hook script lives at `.githooks/pre-commit` — **tracked in the repo**, not
+  `.git/hooks/pre-commit`, since `.git/hooks/` is local-only and never part of a clone.
+  Activated per-clone with `git config core.hooksPath .githooks` (one-time, documented in
+  `docs/git-workflow.md`).
+- Hook fails closed: if `gitleaks` isn't installed, the commit is blocked with an install
+  instruction rather than silently skipping the scan.
+
+**Gotcha — CRLF can break a hook's shebang line.** Windows git (`core.autocrlf=true`)
+normalizes LF→CRLF on checkout; a CRLF-corrupted `#!/bin/sh` line breaks execution
+entirely on some shells. Added a root `.gitattributes` forcing `eol=lf` on `.githooks/*`
+and `*.sh` specifically, so the hook script's line endings can't get corrupted regardless
+of which environment (Windows Git Bash, WSL) checks it out.
+
+**Gotcha — winget updates the PATH registry key immediately, but already-open shells
+don't see it.** After `winget install`, `gitleaks` wasn't found on `PATH` in the same
+terminal session the install ran in — `[Environment]::GetEnvironmentVariable("Path",
+"User")` already had the new entry, but the running shell's cached environment didn't.
+A new terminal window picks it up fine; no reboot needed, just a fresh shell.
+
+**Verified end-to-end** with real `git commit` invocations, not just calling gitleaks
+directly: staged a fake AWS-shaped secret → commit correctly blocked with the finding
+redacted in the output; staged an unrelated clean file → commit went through normally;
+`git commit --no-verify` with the same fake secret staged → correctly bypassed. All test
+commits were reset afterward so none of this test scaffolding made it into real history.
+
+**Aside:** gitleaks' default rule set intentionally allowlists AWS's own well-known
+documentation example key (`AKIAIOSFODNN7EXAMPLE`) — worth knowing so a "no leaks found"
+result against copy-pasted AWS docs examples isn't mistaken for the tool not working. Had
+to retest with a realistic-but-fake key to actually exercise detection.
