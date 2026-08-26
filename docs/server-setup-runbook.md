@@ -492,3 +492,98 @@ commits were reset afterward so none of this test scaffolding made it into real 
 documentation example key (`AKIAIOSFODNN7EXAMPLE`) — worth knowing so a "no leaks found"
 result against copy-pasted AWS docs examples isn't mistaken for the tool not working. Had
 to retest with a realistic-but-fake key to actually exercise detection.
+
+## 2026-08-26 — Frontend Scaffold: Tailwind, React Router, and a Working Login
+
+Installed Tailwind CSS and React Router into `frontend/`, proposed and got approval on
+the full route structure before building anything, then implemented the API client
+layer, layout/nav, route guard, and a fully working `/login` page against the real
+Sanctum-backed API.
+
+### Route structure
+
+Public: `/`, `/notes`, `/notes/:id`, `/blog`, `/blog/:slug`, `/login`. Private (behind a
+route guard, redirects to `/login`): `/my/notes`, `/my/notes/new`, `/my/notes/:id/edit`,
+`/my/blog`, `/my/blog/new`, `/my/blog/:id/edit`.
+
+**Deliberate naming split from the API:** frontend uses `/my/blog`, the API uses
+`/api/my/blog-posts`. Frontend routes optimize for URL readability; API routes follow
+REST resource-naming. They don't need to match, and the API client is the only place
+that needs to know both names.
+
+Only `/login` is a real page this session — every other route is wired into the router
+with a `ComingSoon` placeholder component, so navigation and the auth guard are fully
+testable end-to-end without building the notes/blog UI yet.
+
+### Token storage decision
+
+Sanctum returns a bearer token in the JSON response body (not a cookie) — a constraint
+from how the backend auth was built (decoupled frontend/backend, not same-site), which
+rules out httpOnly cookies as an option without backend changes. Chose `localStorage`
+over `sessionStorage` or in-memory-only storage: the realistic risk for a single-owner
+app isn't a targeted attacker, it's *future code* introducing XSS — most plausibly via
+markdown rendering that executes raw HTML. That's the actual control that matters, not
+the storage mechanism.
+
+**This is now a documented hard constraint**, not just a conversation note — added a
+root `CLAUDE.md` (didn't exist before this session) specifically because it's
+automatically loaded at the start of every future Claude Code session in this repo, which
+is a much stronger guarantee against "forgotten in a future session" than a doc file
+someone has to remember to open. The rule: **the markdown renderer for notes/blog content
+must never execute raw HTML** (e.g. `react-markdown` without a raw-HTML plugin, no
+`dangerouslySetInnerHTML` on user content). Whoever (human or Claude) builds the actual
+note/post rendering later needs to see this before picking a renderer.
+
+### Package choices
+
+- **`react-router` (v8), not `react-router-dom` (v7).** Checked npm directly rather than
+  assuming from memory: `react-router-dom` is now a legacy compat package trailing behind
+  — as of React Router v7's Remix merger, DOM bindings live in the base `react-router`
+  package itself, which is where new development happens (confirmed it's at v8 while
+  `-dom` is stuck at v7).
+- **Tailwind v4 via `@tailwindcss/vite`**, not the old v3 `tailwind.config.js` +
+  PostCSS setup — v4's Vite plugin needs just one line (`@import "tailwindcss";`) in the
+  CSS entrypoint, no config file for a project this size.
+
+### Gotcha: Docker anonymous volumes don't survive `docker compose run --rm`
+
+`docker compose run --rm frontend npm install <pkg>` correctly updated `package.json`
+and `package-lock.json` on the host (bind-mounted), but installed packages themselves
+went into `/app/node_modules` — which is an **anonymous volume**, and `--rm` deletes a
+container's anonymous volumes along with the container. So the install "worked" (host
+manifest files updated) but `node_modules` was empty again immediately after. Fix: the
+Dockerfile already bakes `RUN npm install` into the image at build time, and Docker
+initializes a fresh anonymous volume from whatever already exists at that path in the
+image — so `docker compose build frontend` (to bake the new deps into the image) followed
+by `docker compose up` (fresh anonymous volume, correctly pre-populated) is the actual
+correct sequence any time new frontend packages are added.
+
+### Verification — live containers, no browser tool available this session
+
+Browser automation (`claude-in-chrome`) wasn't available this session — the user declined
+to install the extension. Verified everything possible without it, rather than either
+skipping verification or falsely claiming a browser test happened:
+
+- `npm run build` (`tsc -b && vite build`) — clean, 0 type errors, and the generated CSS
+  bundle (11.8 kB) confirms Tailwind is actually scanning and compiling the utility
+  classes used in the components, not just installed and unused.
+- `npm run lint` (oxlint) — 0 errors. One harmless warning remains about React Fast
+  Refresh granularity for the context+provider pair sharing a file (a standard pattern,
+  used in React's own docs) — split `useAuth` into its own file to clear the first
+  instance of this warning, left the context/provider colocation as-is since fully
+  satisfying the rule would mean 3 files for one small context, not worth it here.
+- Simulated the exact network calls the browser's JS makes: `POST /api/login` with real
+  credentials → `{"token": "..."}`, matching what `AuthContext.login` expects; wrong
+  password → `401`, matching the `ApiError` branch in `Login.tsx`; the token used against
+  an authenticated endpoint (`POST /api/my/logout`) → `204`; confirmed
+  `Access-Control-Allow-Origin: *` is present even with `Origin: http://localhost:5173`
+  explicitly sent, so the browser's cross-origin request won't be blocked.
+- Curled every defined route path against the Vite dev server (`/`, `/login`, `/notes`,
+  `/notes/1`, `/blog`, `/blog/some-slug`, `/my/notes`, `/my/notes/new`, `/my/blog`,
+  `/my/blog/new`) — all return `200` with the SPA shell, confirming Vite's dev-server
+  fallback serves client-side routes correctly rather than 404ing.
+
+**What's NOT verified:** actually clicking through the login form in a real browser and
+watching the redirect + nav state change happen. Left the Docker stack running with a
+test account (`andrew@example.com` / a test password) specifically so this could be
+checked visually afterward — that's the one piece automated checks can't stand in for.
