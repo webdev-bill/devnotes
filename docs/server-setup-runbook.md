@@ -1472,3 +1472,100 @@ enough without it.
 `backend`/`frontend`/`traefik` in `docker-compose.prod.yml` so `up -d --build` itself
 waits for readiness, rather than relying on the deploy script's own retry loop to paper
 over the gap every time.
+
+## 2026-08-27 — Rate Limiting on POST /api/login
+
+Flagged during interview-prep review (not an active incident): the login endpoint had no
+rate limiting at all, meaning unlimited password-guessing attempts against any known
+email. Fixed with a named Laravel rate limiter, proposed and approved before any code was
+written, then built and verified against a real running instance.
+
+### Design: combined email+IP key, not either alone
+
+`RateLimiter::for('login', ...)` in `AppServiceProvider::boot()`, keyed on
+`$request->string('email')->lower().'|'.$request->ip()` — 5 attempts per 60 seconds on
+that combined key, applied via `->middleware('throttle:login')` on the login route only.
+Neither component alone was acceptable:
+- **IP alone** only ever exercises a single vector — trivially bypassed by anyone with
+  more than one IP address (which is most attackers).
+- **Email alone** lets an attacker who doesn't even know the password lock the real
+  owner out of their own account, just by hammering their known email from anywhere.
+
+This is the same combined-key pattern Laravel's own Fortify/Breeze use for exactly this
+reasoning — not a novel design, a well-trodden one.
+
+### A real edge case caught during the proposal step, before any code existed
+
+`throttle:login` runs *before* `LoginRequest`'s validation — FormRequest validation
+happens during controller-argument resolution, which is after route middleware has
+already run. So a malformed request with no `email` field at all would reach the rate
+limiter's key-building closure with a missing input *before* validation ever gets a
+chance to reject it cleanly. Using `Str::lower($request->input('email'))` risked a type
+error or deprecation warning on `null` ahead of that validation. Used
+`$request->string('email')->lower()` instead — Laravel's fluent string helper safely
+defaults to an empty string when the input is missing, so a malformed request just gets
+rate-limited normally (as part of the `''|<ip>` bucket) instead of risking a 500 before
+validation ever runs. Caught and agreed during the propose-before-build step, not
+discovered after the fact.
+
+### Custom 429 response
+
+Overrode the limiter's `response()` (rather than letting Laravel's default
+`ThrottleRequestsException` shape render) to return
+`{"message": "Too many login attempts. Please try again in {N} seconds."}` — `N` read
+directly from the `Retry-After` value Laravel already computes and passes into the
+response callback's `$headers` array, not recalculated separately. The real
+`Retry-After` HTTP header still goes out too (`$headers` passed through to
+`response()->json()`), not just mentioned in the body.
+
+### Verification — real request flow against a running instance, not code review
+
+Confirmed `CACHE_STORE=database` in `backend/.env` before relying on it (rate limiting
+needs a store that persists across requests/processes, not one that resets every
+request) — then verified it empirically too, not just trusted the config read, since the
+whole point of the cooldown-reset test below is proving the store is actually working.
+
+Created a real test user and ran the actual HTTP flow: correct login → `200` with a real
+token. Five wrong-password attempts on the same email+IP → `401` each. Sixth → `429` with
+the custom message and a `Retry-After` header. Also checked something the test plan
+didn't explicitly ask for but the design implies: submitted the *correct* password while
+still within the limited window — still `429`, confirming the block is on the request
+itself, not conditional on the credentials being wrong (an attacker who eventually
+guesses right doesn't get to slip through on the exact request that would have revealed
+it). Waited out the 60-second cooldown, then confirmed a subsequent attempt was allowed
+again (`401` for wrong password, not `429`) — proving the store actually expires counts
+rather than the block being permanent or the whole thing silently not working.
+
+**A methodology mistake caught mid-test, not a bug in the implementation:** the first run
+tested "correct login succeeds" and then immediately started the wrong-password loop
+against the *same* email — but the success check itself is also a request to `/login`
+with the same key, so it consumed one of the 5 allowed slots. The result (4 wrong
+attempts allowed, the 5th blocked) was actually still exactly correct behavior — 5 total
+requests allowed regardless of credential correctness, 6th blocked — but didn't match the
+test plan's literal wording of "5 wrong-password attempts." Re-ran with a second, fully
+isolated test user for a clean, unambiguous sequence: 5 wrong attempts → `401` × 5, 6th →
+`429`, matching the plan exactly. Also confirmed via `route:list -v` that
+`Illuminate\Routing\Middleware\ThrottleRequests:login` is actually attached to the route,
+not just assumed from the code.
+
+Ran the existing backend test suite while in there — one pre-existing, unrelated failure
+(`Tests\Feature\ExampleTest` expects `GET /` to return `200`; this has been a pure
+API-only app with no web routes since the very first backend scaffolding session, so that
+route has never existed). Not caused by this change, not touched, noted for whenever the
+default Laravel scaffold test debris gets cleaned up.
+
+Both test users and their tokens were deleted afterward; dev containers stopped since
+this was a pure backend/API verification with nothing visual to leave running.
+
+### Noted, not built: a broader IP-only layer
+
+Per the agreed scope, no second IP-only limiter was added this pass. Worth flagging for
+later, as the plan asked: the combined email+IP key means an attacker cycling through
+*many different* email addresses from a single IP (a credential-stuffing pattern, not a
+single-account brute-force) isn't meaningfully slowed down by this limiter at all — each
+distinct email is its own 5/60s bucket, so thousands of attempts across thousands of
+emails from one IP would sail through. A secondary, more permissive IP-only limiter (e.g.
+~20-30/min per IP regardless of email) would close that specific gap without touching
+the combined-key limiter's job of protecting individual accounts. Not built now — this is
+exactly the kind of thing to revisit if the login endpoint ever needs to hold up against
+more than "a known-gap fix from an interview-prep pass."
