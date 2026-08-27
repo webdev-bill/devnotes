@@ -909,3 +909,56 @@ check on all four new paths, all `200`.
 nobody has watched this render. The API-level flow above is as rigorous a check as I can
 do without one, but it's not the same claim as "the two-button state switch actually
 looks right once a post is published" — that's still the user's to confirm.
+
+## 2026-08-27 — Bug Report: Published Post Missing from Public /blog (Unresolved)
+
+User reported clicking "Publish" on a post, then seeing an empty `/blog` list with no
+errors anywhere (console, network tab, or UI). Investigated three specific hypotheses
+before touching anything, per the user's request to understand root cause first.
+
+**Timezone mismatch (the user's leading suspect) — ruled out as literally stated, but a
+related real risk remains.** `config('app.timezone')` is hardcoded `'UTC'`; `now()`
+confirmed returning UTC via Tinker; `new Date().toISOString()` (what `BlogForm`'s
+"Publish" button sends) is *always* UTC by JS spec regardless of browser-local
+timezone — so "browser local vs. server UTC" specifically isn't the mechanism. Directly
+tested the `published()` scope's actual SQL and bound values via Tinker (stored
+`published_at` vs. `now()` at query time) and the comparison was correct.
+**However:** the frontend still trusts the *browser's wall clock* for "what time is
+`now`," which is an independent risk from timezone handling — Docker Desktop's VM clock
+drifting after a host sleep/resume is a documented real-world failure mode. No clock skew
+found in this dev environment (host/WSL/container all agreed to the second), but this is
+worth hardening regardless of whether it's the actual cause here — proposed resolving
+"publish now" server-side instead of trusting the client's clock; not yet built, pending
+the user's decision.
+
+**Backend API — not reproducible, and there's direct evidence it's working.** Recreated
+the exact flow (create draft → publish with a JS-`toISOString()`-shaped value → fetch the
+public list) via curl/Tinker and it worked correctly end to end. More tellingly: the
+database already contained a real post (`"hello"`, published earlier by the user's own
+manual testing) that `GET /api/blog-posts` correctly returns right now — meaning the full
+write→store→serve pipeline demonstrably worked for at least one real click.
+
+**Frontend silently swallowing a response — no bug found on read-through.**
+`BlogList.tsx`, `api/blogPosts.ts`, `api/client.ts`, and `useFetch.ts` all read
+structurally correct: `apiRequest` properly awaits and returns `response.json()`,
+`useFetch` properly transitions to `{status: 'success', data}`, and `BlogList`'s
+loading/error/success/empty branching has no path that would render a non-empty
+successful response as blank.
+
+**Conclusion: unresolved, not faked as resolved.** Given the backend demonstrably works
+(including for the user's own real post) and the frontend code reads correctly, the
+leading hypothesis is a stale Vite dev-server/HMR state in the browser tab that had been
+open through many iterative edits to these exact files across two sessions — not a logic
+bug. This is a hypothesis, not a confirmed finding. Asked the user to hard-refresh (or use
+a fresh tab) and, if it still fails, report the actual `GET /blog-posts` response *body*
+from the Network tab — the one piece of evidence this investigation couldn't generate
+without a real browser.
+
+**Separately, a real bug found and fixed:** buttons across the app had no pointer cursor
+on hover (reported specifically for the logout control, but systemic — 9 files have
+`<button>` elements, all affected the same way). Root cause: Tailwind's Preflight reset
+sets `cursor: default` on `<button>` to normalize inconsistent browser UA defaults; `<a>`
+elements (the nav tabs) are untouched by that reset and keep the browser's native pointer
+cursor, which is why the asymmetry was only visible on the logout button specifically.
+Fixed once at the root — `button:not(:disabled) { cursor: pointer; }` in the base layer —
+rather than patching `cursor-pointer` onto nine separate button classNames.
