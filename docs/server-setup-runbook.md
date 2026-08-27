@@ -785,3 +785,39 @@ actually reads correctly at the pixel level, whether the line-number gutter stay
 during fast scrolling, whether the directory-listing rows wrap sensibly on mobile — are
 real, unverified claims, not confirmed ones. Flagging this explicitly rather than
 implying a visual design pass was actually seen by anyone.
+
+## 2026-08-27 — Design Fixes from Real Screenshots: Tab Seam, Desktop Width
+
+The prior session's "not verified — no browser available" caveat turned out to matter:
+the user reviewed actual screenshots (desktop + mobile) and came back with two real
+issues neither build/lint nor CSS-grepping could have caught.
+
+**Tab-to-panel seam didn't merge.** Root cause in the old CSS: the tab had
+`border border-b-0` (bottom border width zeroed), then the active-tab variant tried
+`border-b-white` — coloring a border that has zero width, which renders nothing. Nav and
+the content panel were also separate sibling blocks, `<main>` had its own full `border`
+including a top edge, so there was a real visible line with nothing attempting to cover
+it. Rewrote around adjacent same-color backgrounds instead of border-matching: `Nav` and
+`main` now share one outer box; the tab tray's background is `paper`, the content's is
+`white`, and the active tab is the only tab painted `white` — where it meets the content
+directly below with zero gap, they're the same color touching, which needs no pixel-exact
+border arithmetic to look seamless. Confirmed reliable because it only depends on
+`align-items: flex-end` guaranteeing every tab's bottom edge sits flush with the tray's
+bottom edge (a real flexbox guarantee, not a hopeful negative-margin trick), not on any
+sub-pixel behavior that would need visual testing to trust.
+
+**Desktop felt like a floating card.** Widened the shell `max-w-4xl` → `max-w-6xl`
+(896px → 1152px). Deliberately did *not* apply that width to actual reading/editing
+content: `NoteDetail`'s rendered markdown is capped at `max-w-2xl` (a real reading
+measure) and the note form at `max-w-3xl` (wider than prose since the content field holds
+code, not paragraphs, but still well short of the full shell). The directory-listing
+pages (`/notes`, `/my/notes`) got no cap at all — full shell width, per the explicit
+request, since a real file listing doesn't float as a narrow card. The principle: a wider
+*workspace* doesn't mean wider *paragraphs or form fields* — those still want a bounded
+measure regardless of how much shell space exists around them.
+
+No browser tool this session either — verified via build/lint (clean), grepping the
+compiled CSS for the new width utilities and background tokens, and route regression
+checks, same rigor as before. The actual pixel-level correctness of the seam still
+depends on the user's live check, which is what surfaced these two issues in the first
+place — this is exactly the loop that limitation is supposed to run through.
