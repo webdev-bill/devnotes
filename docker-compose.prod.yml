@@ -62,9 +62,14 @@ services:
     labels:
       - traefik.enable=true
       - traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && PathPrefix(`/api`)
-      # Explicit priority rather than relying on Traefik's rule-specificity
-      # inference — pinning this beats debugging a routing ambiguity later.
-      - traefik.http.routers.backend.priority=10
+      # Explicit priority on BOTH routers (see frontend below), not just this
+      # one — Traefik uses higher-number-wins, and mixing one explicit value
+      # with the other router's auto-computed (rule-string-length-based)
+      # priority is exactly what caused a real production bug: 10 turned out
+      # to be *lower* than frontend's auto-priority, so frontend matched
+      # /api/* requests too and backend never saw them. Pinning both ends the
+      # ambiguity instead of trying to guess which auto-computed value beats which.
+      - traefik.http.routers.backend.priority=100
       - traefik.http.routers.backend.entrypoints=websecure
       - traefik.http.routers.backend.tls.certresolver=letsencrypt
       - traefik.http.services.backend.loadbalancer.server.port=8000
@@ -85,6 +90,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.http.routers.frontend.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.frontend.priority=1
       - traefik.http.routers.frontend.entrypoints=websecure
       - traefik.http.routers.frontend.tls.certresolver=letsencrypt
       - traefik.http.services.frontend.loadbalancer.server.port=80
