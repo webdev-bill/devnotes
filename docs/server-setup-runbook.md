@@ -148,6 +148,13 @@ reboot
       the frontend's publish control only offers "now" or "never" (draft).
       Deliberately deferred in the 2026-08-27 blog pages session in favor of
       the simpler two-button draft/publish pair
+- [ ] Resolve "publish now" server-side instead of trusting the browser's clock
+      — `BlogForm`'s Publish button currently sends `new Date().toISOString()`
+      from the client. Not the cause of the 2026-08-27 missing-post report
+      (that was a stale browser cache), but a real independent risk — a
+      client clock drifting behind the server's (e.g. Docker Desktop's VM
+      clock after a host sleep/resume) could silently schedule a post
+      slightly in the future
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -910,7 +917,7 @@ nobody has watched this render. The API-level flow above is as rigorous a check 
 do without one, but it's not the same claim as "the two-button state switch actually
 looks right once a post is published" — that's still the user's to confirm.
 
-## 2026-08-27 — Bug Report: Published Post Missing from Public /blog (Unresolved)
+## 2026-08-27 — Bug Report: Published Post Missing from Public /blog (Resolved: Not a Bug)
 
 User reported clicking "Publish" on a post, then seeing an empty `/blog` list with no
 errors anywhere (console, network tab, or UI). Investigated three specific hypotheses
@@ -945,14 +952,21 @@ structurally correct: `apiRequest` properly awaits and returns `response.json()`
 loading/error/success/empty branching has no path that would render a non-empty
 successful response as blank.
 
-**Conclusion: unresolved, not faked as resolved.** Given the backend demonstrably works
-(including for the user's own real post) and the frontend code reads correctly, the
-leading hypothesis is a stale Vite dev-server/HMR state in the browser tab that had been
-open through many iterative edits to these exact files across two sessions — not a logic
-bug. This is a hypothesis, not a confirmed finding. Asked the user to hard-refresh (or use
-a fresh tab) and, if it still fails, report the actual `GET /blog-posts` response *body*
-from the Network tab — the one piece of evidence this investigation couldn't generate
-without a real browser.
+**Conclusion at the time: unresolved, not faked as resolved.** Given the backend
+demonstrably worked (including for the user's own real post) and the frontend code read
+correctly, the leading hypothesis was a stale Vite dev-server/HMR state in the browser tab
+that had been open through many iterative edits to these exact files across two
+sessions — not a logic bug. That was a hypothesis, not a confirmed finding at the time, so
+it was logged as unresolved rather than claimed fixed.
+
+**Confirmed afterward: correct call, not a real bug.** User hard-refreshed and checked the
+actual `GET /blog-posts` network response directly — the published post was in the
+response body all along. Stale browser/dev-server cache, exactly as hypothesized; no
+backend or timezone bug. The independent risk surfaced during the investigation (the
+frontend trusting the browser's wall clock for "now" rather than resolving publish time
+server-side) is still real and worth hardening even though it wasn't the actual cause
+here — added to the "still to do" list below rather than dropped just because this
+specific report turned out to be something else.
 
 **Separately, a real bug found and fixed:** buttons across the app had no pointer cursor
 on hover (reported specifically for the logout control, but systemic — 9 files have
