@@ -10,7 +10,7 @@ export default function ThemeToggle() {
       onClick={() => setTheme(isDark ? 'light' : 'dark')}
       aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
       title={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
-      className="mb-2 shrink-0 text-ink/45 transition-colors hover:text-ink"
+      className="shrink-0 text-ink/45 transition-colors hover:text-ink"
     >
       {isDark ? (
         // Sun — shown when dark is active, click to go light.

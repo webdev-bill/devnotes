@@ -58,18 +58,24 @@ export default function Nav() {
         ) : (
           <Tab to="/login" label="~/login.sh" />
         )}
-        {/* Not styled as a tab — same reasoning as Logout below: it isn't a page. */}
-        <ThemeToggle />
       </div>
-      {isAuthenticated && (
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="mb-2 shrink-0 font-display text-xs text-ink/45 hover:text-flag"
-        >
-          log out
-        </button>
-      )}
+      {/* Persistent controls, not tabs — kept out of the tabs' scrolling
+          group (shouldn't be able to scroll out of view on a narrow
+          viewport) and given their own centered alignment/spacing rather
+          than reusing the tabs' tab-to-tab gap-1. Not styled as tabs either
+          — same reasoning as always: neither is a page. */}
+      <div className="mb-2 flex shrink-0 items-center gap-4">
+        <ThemeToggle />
+        {isAuthenticated && (
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="font-display text-xs text-ink/45 hover:text-flag"
+          >
+            log out
+          </button>
+        )}
+      </div>
     </div>
   )
 }
