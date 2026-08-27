@@ -1569,3 +1569,62 @@ emails from one IP would sail through. A secondary, more permissive IP-only limi
 the combined-key limiter's job of protecting individual accounts. Not built now — this is
 exactly the kind of thing to revisit if the login endpoint ever needs to hold up against
 more than "a known-gap fix from an interview-prep pass."
+
+## 2026-08-27 — Dependabot Alerts + Security Updates Enabled
+
+Enabled GitHub's built-in Dependabot on the repo (`webdev-bill/devnotes`) as automated
+dependency vulnerability scanning for both Composer (Laravel, `composer.lock`) and npm
+(React, `package-lock.json`). This was a repo settings change, made via Settings → Code
+security — not a code change, so there's nothing to commit for the change itself, only
+this log entry.
+
+### What was enabled
+
+- **Dependabot alerts** — passive scan of `composer.lock` and `package-lock.json` against
+  GitHub's Advisory Database. Alert-only: surfaces known vulnerabilities in the dependency
+  tree, opens no PRs.
+- **Dependabot security updates** — when an alert fires *and* a patched version is
+  available, GitHub auto-opens a PR bumping just that package to the patched version.
+  Reactive, not proactive — it only acts in response to an actual alert, not on every new
+  release upstream.
+
+### What was deliberately left off, and why
+
+- **Dependabot malware alerts** — a separate feature from vulnerability alerts; flags
+  packages GitHub identifies as outright malicious rather than merely vulnerable. Not
+  requested this pass. Low cost to add later if wanted — it's a settings toggle, not an
+  architecture decision.
+- **Grouped security updates** — bundles multiple simultaneous security-update PRs into
+  one, to cut down on PR noise. Only useful once there are actually multiple concurrent
+  alerts to group; at current scale (small, freshly-scaffolded dependency tree) there's
+  nothing to group yet. Easy to turn on later if the PR volume ever justifies it.
+- **Dependabot version updates** — the proactive "open a PR whenever any dependency has a
+  newer release, vulnerable or not" feature. Deliberately skipped in favor of the
+  narrower, reactive-only vulnerability scanning that was actually requested. Unlike the
+  two features above, this one isn't a plain settings toggle — it requires a tracked
+  `.github/dependabot.yml` config file (schedule, package ecosystems, version bump
+  strategy, etc.), so revisiting it later is a real config-authoring task, not a checkbox.
+
+### No config file needed for what was enabled
+
+Both Dependabot alerts and Dependabot security updates are pure GitHub repo settings —
+there is no `.github/dependabot.yml` or any other tracked file backing them. Nothing was
+committed to the repo for this change; the only trace of it is this runbook entry and the
+repo's Settings → Code security page itself.
+
+### Pre-existing preset rule, checked and confirmed benign — not something either of us configured
+
+The repo already had a GitHub-managed preset enabled: **"Dismiss low-impact alerts for
+development-scoped dependencies."** This automatically dismisses alerts for vulnerable
+`require-dev` / `devDependencies` packages that GitHub's own scoring methodology rates as
+low-impact — i.e., non-exploitable at runtime, things like a vulnerable version of a test
+runner or build tool that can't affect the deployed application. Neither of us turned this
+on; it ships as a GitHub default. Left as-is — reasonable behavior for this project, not a
+gap to close.
+
+Worth stating explicitly, though, since it's easy to misread "Dependabot alerts enabled"
+as "every vulnerable dependency produces a visible alert" — it doesn't. Low-impact,
+dev-only CVEs are silently dismissed by this preset by design, before they ever surface as
+an alert to review. A second preset, **"Dismiss package malware alerts,"** is also present
+on the repo but is disabled — consistent with malware alerts being left off overall per
+the decision above.
