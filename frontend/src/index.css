@@ -24,6 +24,15 @@
     outline-offset: 2px;
   }
 
+  /* Tailwind's Preflight resets <button> to cursor: default (normalizing
+     inconsistent browser defaults) — but every button in this app is a real
+     click target, so restore the pointer cursor globally rather than
+     patching it one className at a time across every button. Disabled
+     buttons intentionally keep the non-interactive cursor. */
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
