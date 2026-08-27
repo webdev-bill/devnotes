@@ -1027,3 +1027,134 @@ default to `andrew` rather than `root`.
 **Not done yet, on purpose:** root password/SSH login itself hasn't been disabled server-
 side. That's the natural next hardening step now that the `andrew` account is proven to
 work, not something to rush ahead of verification.
+
+## 2026-08-27 — Production Docker Compose + Traefik (Files Only, Not Deployed)
+
+DNS went live this session (`devnotes.billandrewsallao.com` → the Droplet's IP),
+prompting the actual production stack design. Proposed the full architecture before
+writing anything — file structure, Traefik routing/cert-issuance mechanics, env var
+handling, Postgres hardening — and got it confirmed, including one real fork the user
+made a call on (see below), before building. Nothing was deployed or run on the server
+this session; everything below was built and validated **locally only**.
+
+### Separate `docker-compose.prod.yml`, not an override
+
+Compose's override mechanism suits a small delta from dev. Here the delta is large:
+volume strategy flips entirely (dev bind-mounts source for hot reload; prod bakes built
+artifacts into images), almost all port publishing disappears (Traefik takes over), and
+the frontend needs a fundamentally different build. A separate, fully self-contained file
+is easier to read as "this is what actually runs in production" than a merge would be.
+
+### Backend server: PHP-FPM + nginx, not `php artisan serve`
+
+Explicitly offered this as a choice rather than deciding unilaterally — `artisan serve`
+would have worked for a low-traffic personal site with zero new Dockerfile work, but
+Laravel's own docs call it dev-only. **User chose PHP-FPM + nginx** — the more correct
+setup, worth the extra moving parts for something that's also a portfolio piece.
+Implementation: multi-stage `backend/Dockerfile.prod` (stage 1: `composer install
+--no-dev` via the official `composer` image; stage 2: `php:8.4-fpm` + nginx + supervisor,
+supervisor running both processes and forwarding their logs to stdout/stderr so `docker
+logs` captures everything). nginx proxies `.php` requests to PHP-FPM over
+`127.0.0.1:9000` (the base image's default FPM listen address — didn't need to touch
+`www.conf`) and serves `public/` directly for everything else.
+
+**Deliberately not done this pass:** `config:cache`/`route:cache` at build time. This is
+a known Laravel-in-Docker trap — caching config during the Docker *build* stage would
+bake in whatever (empty/default) env values exist at build time, not the real production
+values injected at container *run* time, silently caching wrong config (e.g. `DB_HOST`
+as unset instead of `db`). Skipped for correctness; a real optimization worth doing
+properly later (cache at container startup via an entrypoint script, after real env vars
+are available), not worth the risk of a subtle bug for a low-traffic site right now.
+
+### Frontend: multi-stage build, and the SPA-fallback gotcha
+
+`frontend/Dockerfile.prod`: stage 1 `npm run build` (needs `VITE_API_URL` as a **build
+arg**, not a runtime env var — Vite inlines `VITE_*` vars into the static bundle at build
+time; there's no Node process left at runtime to read one from), stage 2 copies `dist/`
+into `nginx:alpine`. This one wasn't a choice the way the backend was — there's no
+reasonable way to run the Vite dev server in production.
+
+**Real bug caught by local testing, not just written correctly by inspection:**
+`frontend/nginx.conf` needs `try_files $uri $uri/ /index.html;` or a static file server
+will 404 any client-side route on direct visit/refresh (`/notes/5` isn't a real file on
+disk — only React Router knows what to do with it, and only after `index.html` has
+loaded and the app has booted). Wrote it correctly the first time from knowing the
+gotcha, then verified rather than assumed: built the image, ran it, curled `/notes/5`
+directly, confirmed `200` with `<title>devnotes</title>` in the body — not a 404.
+
+### Traefik: Docker-label-driven routing, HTTP-01 challenge, named volume for certs
+
+- `--providers.docker.exposedByDefault=false` — only containers explicitly labeled
+  `traefik.enable=true` get routed, so nothing gets exposed by accident as more
+  containers get added later.
+- HTTP-01 challenge (simplest option — just needs port 80 reachable, no DNS provider API
+  credentials, unlike DNS-01).
+- **Named volume for `/letsencrypt`, not a bind-mount** — Traefik creates `acme.json`
+  itself inside the container with correct `600` permissions on first run. The classic
+  "chmod your acme.json or Traefik silently refuses to use it" gotcha is specifically a
+  bind-mount problem; a named volume sidesteps the entire class of issue.
+- Backend router: `Host(...) && PathPrefix(/api)`, explicit `priority=10` rather than
+  relying on Traefik's rule-specificity inference to rank it above the frontend's bare
+  `Host` catch-all — pinning it explicitly beats debugging a routing ambiguity later.
+  **No `StripPrefix` middleware** — Laravel's own routing already expects the `/api`
+  prefix (`bootstrap/app.php`'s `api:` routing), so it passes through unchanged. Stripping
+  it would make Laravel receive `/notes` instead of `/api/notes` and 404 everything.
+- `${DOMAIN}` is an env var throughout, never hardcoded into the compose file or labels —
+  consistent with the project's existing rule against hardcoded domains.
+
+### Environment variables
+
+New `.env.production.example` (tracked) mirrors the existing `.env.example` pattern —
+placeholders only. Real `.env.production` will live only on the server, gitignored,
+filled with real secrets. **Found and fixed a real gap while creating it**: the root
+`.gitignore`'s `.env` rule only matches a file literally named `.env` — it would *not*
+have caught `.env.production` (a different filename). Added `.env.production` and
+`.env.*.local` patterns before creating the file that needed them, not after.
+
+**`ACME_EMAIL` deliberately isn't in the tracked `.example` file** — the user's real
+email is going in the real (gitignored) `.env.production` on the server, but a personal
+email in a file that gets committed to a public repo is exactly the mistake from the
+2026-08-26 secrets audit session, so a placeholder (`you@example.com`) went in the
+tracked file instead, with the real value communicated in chat, not committed.
+
+Also: `VITE_API_URL` becomes relative (`/api`) in production, not absolute like dev's
+`http://localhost:8000/api` — Traefik puts frontend and backend on the *same* domain
+(routing by path, not port), so production requests are same-origin. Worth noting: the
+permissive CORS setup relied on for local dev (cross-origin, different ports) becomes
+irrelevant for the app's own traffic in production — not a security problem given the
+bearer-token, no-cookie auth model, just no longer load-bearing.
+
+### Postgres: confirmed volume persistence, removed the public port
+
+Named volume (`db_data`) persistence already existed and carries over unchanged. The one
+real production change: **no `ports:` mapping at all**. Dev publishes `${DB_PORT}:5432`
+for local GUI tools; in production, Postgres has no reason to be reachable from the
+public internet even password-protected. It's now reachable only by the backend
+container, over the Docker network — `docker compose exec db psql` (or an SSH tunnel) for
+any direct access needed later.
+
+### Verified locally — real validation, not just written and assumed correct
+
+Nothing was deployed to the Droplet, but nothing was taken on faith locally either:
+- `docker compose -f docker-compose.prod.yml config` — confirmed valid syntax with dummy
+  env values.
+- Built both `Dockerfile.prod`s locally end to end (`docker build`, not just linted by
+  eye) — both succeeded.
+- **Ran the built backend image** (SQLite swapped in just for this smoke test — no need
+  to spin up Postgres to prove the web server stack itself works) and confirmed via
+  `docker logs` that both `nginx` and `php-fpm` started under supervisor and stayed
+  running, then curled `/up` through the full nginx→FastCGI→PHP-FPM→Laravel path and got
+  `200` — proving the nginx config and FPM socket wiring are actually correct, not just
+  plausible-looking.
+- **Ran the built frontend image** and specifically tested the SPA-fallback gotcha
+  described above — confirmed, not assumed.
+- Cleaned up all test containers and images afterward; nothing left running locally, and
+  the Droplet itself was never touched.
+
+### Still ahead before this actually goes live
+
+`ufw` on the Droplet only allows SSH right now (from initial hardening) — `80/tcp` and
+`443/tcp` need opening before Traefik can do anything, regardless of how correct this
+compose file is. That's a deploy-time step, deliberately not run yet — the user will
+confirm before anything runs on the server, and that ufw step is the thing most likely to
+be forgotten in the moment, so it's flagged here specifically to not be.
