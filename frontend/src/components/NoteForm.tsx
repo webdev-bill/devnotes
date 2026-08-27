@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import type { Note, NotePayload, NoteVisibility } from '../api/types'
+import { inputClass, labelClass } from './formStyles'
 import LineNumberedTextarea from './LineNumberedTextarea'
 
 type NoteFormProps = {
@@ -7,11 +8,6 @@ type NoteFormProps = {
   onSubmit: (payload: NotePayload) => Promise<void>
   submitLabel: string
 }
-
-const inputClass =
-  'mt-1 block w-full rounded-md border border-rule bg-white px-3 py-2 font-body text-sm text-ink shadow-sm focus:border-keyword focus:outline-none'
-
-const labelClass = 'font-display text-xs tracking-wide text-ink/60 uppercase'
 
 export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFormProps) {
   const [title, setTitle] = useState(initialNote?.title ?? '')

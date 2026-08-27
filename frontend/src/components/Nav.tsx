@@ -50,7 +50,10 @@ export default function Nav() {
         <Tab to="/notes" label="~/notes.md" />
         <Tab to="/blog" label="~/blog.md" />
         {isAuthenticated ? (
-          <Tab to="/my/notes" label="~/dashboard.md" />
+          <>
+            <Tab to="/my/notes" label="~/my-notes.md" />
+            <Tab to="/my/blog" label="~/my-blog.md" />
+          </>
         ) : (
           <Tab to="/login" label="~/login.sh" />
         )}

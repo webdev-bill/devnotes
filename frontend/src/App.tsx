@@ -29,7 +29,7 @@ export default function App() {
           <Route path="my/notes/:id/edit" element={<NoteForm />} />
           <Route path="my/blog" element={<BlogDashboard />} />
           <Route path="my/blog/new" element={<BlogForm />} />
-          <Route path="my/blog/:id/edit" element={<BlogForm />} />
+          <Route path="my/blog/:slug/edit" element={<BlogForm />} />
         </Route>
       </Route>
     </Routes>

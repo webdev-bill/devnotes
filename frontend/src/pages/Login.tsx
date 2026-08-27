@@ -1,12 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { ApiError } from '../api/client'
+import { inputClass, labelClass } from '../components/formStyles'
 import { useAuth } from '../context/useAuth'
-
-const inputClass =
-  'mt-1 block w-full rounded-md border border-rule bg-white px-3 py-2 font-body text-sm text-ink shadow-sm focus:border-keyword focus:outline-none'
-
-const labelClass = 'font-display text-xs tracking-wide text-ink/60 uppercase'
 
 export default function Login() {
   const { login } = useAuth()

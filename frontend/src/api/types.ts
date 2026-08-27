@@ -31,3 +31,19 @@ export type Paginated<T> = {
   last_page: number
   total: number
 }
+
+export type BlogPost = {
+  id: number
+  title: string
+  slug: string
+  content: string
+  published_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type BlogPostPayload = {
+  title: string
+  content: string
+  published_at: string | null
+}
