@@ -25,7 +25,9 @@ export default function NoteDetail() {
         <TagPills tags={note.tags} />
       </div>
       <h1 className="mt-4 font-display text-xl font-semibold text-ink">{note.title}</h1>
-      <div className="prose mt-6 max-w-none">
+      {/* Constrained to a readable line length even though the shell itself
+          is wide now — a wide workspace panel doesn't mean wide paragraphs. */}
+      <div className="prose mt-6 max-w-2xl">
         {/*
           NEVER add rehype-raw (or any plugin enabling raw HTML passthrough)
           here. This is user-authored markdown rendered for arbitrary

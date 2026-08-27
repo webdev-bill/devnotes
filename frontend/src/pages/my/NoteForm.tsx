@@ -46,7 +46,11 @@ export default function NoteForm() {
   if (isEditing && state.status === 'error') return <ErrorState message={state.message} />
 
   return (
-    <div>
+    // A bit wider than the pure-reading column on NoteDetail (max-w-2xl) —
+    // the content field here is code, which wants more horizontal room than
+    // prose, but still bounded well short of the full workspace width so the
+    // title/tags/visibility inputs don't stretch absurdly wide.
+    <div className="max-w-3xl">
       <p className="font-display text-xs text-ink/40">
         {isEditing ? `~/notes/${id}.md` : '~/notes/new.md'}
       </p>
