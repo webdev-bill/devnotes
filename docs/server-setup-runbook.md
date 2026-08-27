@@ -1158,3 +1158,52 @@ Nothing was deployed to the Droplet, but nothing was taken on faith locally eith
 compose file is. That's a deploy-time step, deliberately not run yet — the user will
 confirm before anything runs on the server, and that ufw step is the thing most likely to
 be forgotten in the moment, so it's flagged here specifically to not be.
+
+## 2026-08-27 — Uptime + SSL Certificate Expiry Monitoring (StatusCake)
+
+Closed the "no monitoring/alerting exists yet" gap flagged earlier in this runbook.
+Wanted something that would catch two independent failure modes before a visitor did:
+the site being down, and the Let's Encrypt certificate lapsing or becoming invalid.
+
+### Tool choice, and why it took three tries
+
+Initial pick was Better Stack (free tier, SSL checks built into the same uptime
+monitor) — signup rejected the personal email domain being used. Second pick was
+HetrixTools (free tier, generous limits, SSL included) — rejected on trust grounds
+(smaller/lesser-known provider) before signing up. Landed on **StatusCake**: an
+established provider (operating since 2012, large customer base), free plan requires
+only an email and no credit card, and — unlike Better Stack's combined model —
+StatusCake splits uptime and SSL into two separate test types rather than one
+toggle on a single monitor.
+
+### What's configured
+
+- **Uptime test** (`devnotes site`, HTTP type): checks `https://devnotes.billandrewsallao.com`
+  every 15 minutes. Confirmed showing UP (green status) after creation.
+- **SSL test** (separate test, since StatusCake doesn't bundle this into the uptime
+  test the way some competitors do): same URL, 24-hour check rate (free-tier ceiling —
+  faster intervals are a paid "Business Critical" feature, not needed here since cert
+  expiry is a slow-moving problem by nature).
+  - Alert on Expiration: enabled
+  - Alert on Problems (invalid/misconfigured cert): enabled
+  - Mixed Content Warnings: enabled
+  - Reminder schedule: 30 / 7 / 1 days before expiration
+- Both tests share one Contact Group (email) so alerts land in the same inbox
+  regardless of which check fires.
+
+### Gotcha: the SSL test's Contact Group is easy to leave empty
+
+The "Create test" form doesn't block submission if **Contact Groups** is left on
+"Select an option" — a test with no contact group will still run and detect problems,
+it just won't tell anyone. Caught this before finalizing the SSL test; worth
+double-checking on any future test creation in StatusCake, since a monitor silently
+collecting data with nobody subscribed is functionally the same as no monitor at all.
+
+### Still to do
+
+- [ ] Fire an actual test alert (if/when StatusCake exposes that option) or wait for
+      a real check cycle to confirm the alert email reliably lands in the inbox and
+      isn't filtered to spam — configured but not yet end-to-end verified with a real
+      notification received.
+- [ ] Revisit if this project ever needs multi-region checks or sub-24h SSL check
+      frequency — both are free-tier limitations, not needed at current traffic/scale.
