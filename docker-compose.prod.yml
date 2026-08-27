@@ -1,0 +1,112 @@
+# Production stack. Not the same shape as docker-compose.yml (dev) on purpose
+# — see docs/server-setup-runbook.md for why this is a separate file rather
+# than an override.
+#
+# Usage (on the server, once deployed — NOT run by this repo automatically):
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Prerequisite this file can't enforce: ufw must allow 80/tcp and 443/tcp on
+# the Droplet (only OpenSSH is allowed by default from initial hardening).
+services:
+  traefik:
+    image: traefik:v3
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      # Only containers explicitly labeled traefik.enable=true get routed —
+      # nothing is exposed by accident as more services get added later.
+      - --providers.docker.exposedByDefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # Plain HTTP always redirects to HTTPS.
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # Read-only: Traefik only needs to observe containers/labels, not
+      # control them.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Named volume, not a bind-mount — Traefik creates acme.json itself
+      # inside the container with correct 600 permissions on first run,
+      # sidestepping the classic "chmod your acme.json" bind-mount gotcha.
+      - traefik_certs:/letsencrypt
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    environment:
+      APP_NAME: ${APP_NAME}
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      APP_URL: https://${DOMAIN}
+      APP_KEY: ${APP_KEY}
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: ${DB_DATABASE}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    # No published port — only reachable through Traefik over the default
+    # Compose network.
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && PathPrefix(`/api`)
+      # Explicit priority rather than relying on Traefik's rule-specificity
+      # inference — pinning this beats debugging a routing ambiguity later.
+      - traefik.http.routers.backend.priority=10
+      - traefik.http.routers.backend.entrypoints=websecure
+      - traefik.http.routers.backend.tls.certresolver=letsencrypt
+      - traefik.http.services.backend.loadbalancer.server.port=8000
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Vite inlines VITE_* vars into the static bundle at build time, so
+        # this has to be a build arg — setting it as a plain runtime
+        # environment: value here would do nothing, there's no Node process
+        # left at runtime to read it.
+        VITE_API_URL: ${VITE_API_URL}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.frontend.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.frontend.entrypoints=websecure
+      - traefik.http.routers.frontend.tls.certresolver=letsencrypt
+      - traefik.http.services.frontend.loadbalancer.server.port=80
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # Deliberately no ports: mapping — unlike dev, Postgres has no business
+    # being reachable from the public internet, even password-protected.
+    # Only the backend container can reach it, over the Docker network.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+  traefik_certs:

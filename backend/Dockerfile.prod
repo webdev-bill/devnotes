@@ -1,0 +1,36 @@
+# Production image: multi-stage build, PHP-FPM + nginx in one container,
+# managed by supervisord. Not hot-reloadable like Dockerfile (dev) — this
+# bakes the application code into the image; nothing is bind-mounted.
+
+# ---- Stage 1: install PHP dependencies with dev tooling excluded ----
+FROM composer:latest AS vendor
+
+WORKDIR /app
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
+
+COPY . .
+RUN composer dump-autoload --optimize --no-dev
+
+# ---- Stage 2: runtime ----
+FROM php:8.4-fpm AS runtime
+
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    nginx \
+    supervisor \
+    && docker-php-ext-install pdo pdo_pgsql \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /var/www/html
+
+COPY --from=vendor /app ./
+
+COPY docker/nginx.conf /etc/nginx/sites-enabled/default
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+
+EXPOSE 8000
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

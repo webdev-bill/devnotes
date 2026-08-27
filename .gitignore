@@ -1,5 +1,7 @@
 # --- Environment files (never commit secrets) ---
 .env
+.env.production
+.env.*.local
 
 # --- Laravel (backend/) ---
 backend/vendor/
