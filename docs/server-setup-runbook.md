@@ -705,3 +705,83 @@ actually update the list on screen, does the markdown render correctly) hasn't b
 watched happen by anyone. Server-side, the guard's `401` is confirmed solid regardless of
 headers sent (see the bug above) — but "does the client-side redirect component actually
 fire" is a real, distinct claim I have not verified.
+
+## 2026-08-27 — Real Design Pass: Tokens, Editor-Tab Nav, Directory-Listing UI
+
+Applied `/mnt/skills/public/frontend-design/SKILL.md`'s process (brainstorm → critique
+against its own "generic AI look" warning list → revise → build) to replace the default
+unstyled-Tailwind look across the layout/nav, `/notes`, `/notes/:id`, `/my/notes`, the
+note create/edit form, and `/login`. Blog pages and `Home` were explicitly out of scope
+(not named in the request) and were left untouched — they'll look inconsistent inside the
+new shell until their own pass happens.
+
+**Aside on process:** the skill file wasn't actually present in this environment at the
+path the user gave (`/mnt/skills/public/frontend-design/SKILL.md` — checked WSL, the
+Windows-side filesystem, and a broad search; genuinely not installed here). Rather than
+fabricate its contents or quietly substitute generic "avoid AI look" judgment for a skill
+the user explicitly wanted followed, asked how to proceed — they pasted the file's actual
+content directly. Followed it from that pasted text.
+
+### The self-critique the skill's process asks for
+
+First instinct for "developer tool" was dark background, monospace everywhere, one neon
+accent — which is almost exactly the skill's own cluster-2 warning (near-black + single
+acid accent). Named that explicitly and rejected it before designing anything, in favor
+of a *light* editor theme with a small semantic accent system borrowed from syntax
+highlighting (keyword-blue, string-green, error-red as three distinct roles, not one
+brand color) rather than a single arbitrary hue.
+
+### What shipped
+
+- **Design tokens** in `frontend/src/index.css` via Tailwind v4's CSS-first `@theme`
+  block (no `tailwind.config.js` needed) — `paper` `#F6F7FA`, `ink` `#1B2430`, `rule`
+  `#DEE2E9`, `keyword` `#3555D8`, `string` `#1F8A5F`, `flag` `#C23B3B`. Confirmed these
+  actually compiled into real utility classes (`.bg-keyword`, `.text-flag`, etc.) by
+  grepping the production CSS build output, not just assuming Tailwind picked them up.
+- **Type**: IBM Plex Mono for display/headings (a deliberate inversion — mono is usually
+  reserved for code blocks; here it's the headline voice, since the whole product's
+  premise is code) and IBM Plex Sans for body/prose. Loaded via Google Fonts
+  `<link>` tags in `index.html` (preconnect + stylesheet), not a blocking `@import` in CSS.
+- **Signature element: the nav is a tab strip.** `~/notes.md`, `~/blog.md`,
+  `~/dashboard.md`/`~/login.sh` depending on auth state, styled like open files in an
+  editor — the active tab visually merges into the content panel below it (classic
+  matching-border-color tab trick: active tab's bottom border is the same white as the
+  panel it sits on). Logout is deliberately *not* rendered as a tab — it isn't a page, so
+  pretending it's one would misrepresent the nav's own structure.
+- **Notes lists render as a directory listing** (numbered rows, bracketed `[language]`,
+  `#tag` tokens in muted mono) rather than a card grid — literal to the content, since
+  these are files in a personal vault, not abstract feed items.
+- **The note form's content field has a live line-number gutter** synced to the textarea
+  via scroll-position matching — the one signature element that's genuinely functional,
+  not just decorative chrome.
+- **Loading state** is a blinking `_` cursor (`motion-safe:animate-pulse`, so
+  `prefers-reduced-motion` gets a static cursor instead). **Empty states** read like a
+  code comment (`// no notes found`). **Error states** keep a compiler-annotation frame
+  (small red "ERROR" label) but the actual message stays full-contrast, plain body text —
+  see the fix below for why that split matters.
+
+### Fixed after user feedback, before it shipped wrong
+
+Initial empty-state pass put the *entire* message (not just the decorative `//` prefix)
+at `text-ink/50` — roughly a 3:1 contrast gray, borderline for text someone actually needs
+to read. The user's approval on the plan had explicitly flagged this exact risk: the
+skill's own writing guidance puts clarity on "what happened" before voice/personality,
+and stylized-but-illegible would violate that. Fixed by splitting the two: the `// `
+prefix stays muted (`ink/35`, purely decorative), the actual message is now full-strength
+`text-ink` (matching the pattern already used correctly in `ErrorState`, where the "ERROR"
+label is styled but the message itself was always plain body text at full contrast).
+
+### Verification
+
+Full build and lint clean (only the pre-existing, previously-accepted `AuthContext`
+fast-refresh warning remains). Confirmed the `@theme` tokens actually generated real
+Tailwind utilities by grepping the compiled CSS bundle directly, rather than assuming.
+Regression-checked all six routes still return `200` after the rewrite.
+
+**Not verified, same limitation as the last two sessions:** no browser automation
+available, so nobody has actually looked at this. Alignment details that are hard to
+reason about from markup alone — whether the tab-strip's "merges into the panel" illusion
+actually reads correctly at the pixel level, whether the line-number gutter stays in sync
+during fast scrolling, whether the directory-listing rows wrap sensibly on mobile — are
+real, unverified claims, not confirmed ones. Flagging this explicitly rather than
+implying a visual design pass was actually seen by anyone.
