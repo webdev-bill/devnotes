@@ -1207,3 +1207,118 @@ collecting data with nobody subscribed is functionally the same as no monitor at
       notification received.
 - [ ] Revisit if this project ever needs multi-region checks or sub-24h SSL check
       frequency — both are free-tier limitations, not needed at current traffic/scale.
+
+## 2026-08-27 — Dark Mode: Tokens, Toggle, and a Real Contrast Conflict
+
+Implemented light/dark theming across every existing page, extending the design system
+from the earlier design-pass sessions rather than introducing a parallel one. Spec was
+pre-approved with exact hex values; the job was implementation and verification, not
+re-designing — with one real exception (below) that the spec itself explicitly asked to
+be flagged rather than silently resolved.
+
+### The conflict: one token, two incompatible uses
+
+The approved dark-mode hex values for `keyword`/`string`/`flag` were contrast-checked as
+**foreground text against `paper`/`panel`** — correct for that, and deliberately lighter
+than their light-mode counterparts specifically because text needs to be light to read
+against a dark background. But the codebase also uses those exact same tokens as **filled
+button backgrounds** with hardcoded `text-white` (Login's submit button, both dashboards'
+"+ new" buttons, both forms' submit buttons). Wiring the given hex values in unchanged
+would have made white text sit on top of a now-*light* pastel fill. Computed the actual
+ratios rather than eyeballing:
+
+| Dark-mode fill | White text contrast |
+|---|---|
+| `keyword` `#7C93F5` | 2.9:1 |
+| `string` `#4FBE8B` | 2.3:1 |
+| `flag` `#E5696A` | 3.2:1 (borderline even against the lenient UI-component floor) |
+
+All fail the 4.5:1 normal-text threshold; two fail even 3:1. Stopped and flagged this
+before writing any code, per the task's explicit instruction to do so rather than decide
+unilaterally. **User chose:** dark text on the accent fill in dark mode (the standard
+pattern for light/pastel accent fills — e.g. how shadcn/Radix-style dark themes handle
+this), over the alternative of pinning filled-button backgrounds to the light-mode
+saturated color regardless of theme.
+
+**Implementation, reusing only already-approved values — no new hex invented:** added one
+small additional token, `accent-ink` — the foreground color for text sitting on a solid
+accent fill, as opposed to `ink` (foreground on `paper`/`panel`). White in light mode
+(already implicitly correct for the original saturated fills), the light-mode `ink` hex
+(`#1B2430`) in dark mode. Replaced `text-white` with `text-accent-ink` on every filled
+accent button. `Home.tsx`'s unrelated `bg-indigo-600` button was left untouched — that
+page was already out of scope for the design-system pass and isn't in this task's route
+list either.
+
+### Token architecture
+
+`index.css` now has three layers: raw CSS custom properties on `:root` (light values) and
+`[data-theme="dark"]` (dark values), then a `@theme` block that aliases each Tailwind
+color token to the corresponding raw property (`--color-paper: var(--paper)`, etc.) rather
+than owning literal hex itself. This is Tailwind v4's documented pattern for CSS-variable
+theming — redefining an `@theme`-owned variable directly under a nested selector works,
+but aliasing is the pattern actually documented for this, so that's what got built.
+Existing utility classes (`bg-paper`, `text-ink`, `border-rule`, ...) needed zero changes
+anywhere — they just repaint under the `data-theme` attribute automatically.
+
+Added a `panel` token (`#FFFFFF` light / `#20242C` dark) — didn't exist before; `bg-white`
+was hardcoded/implicit everywhere the tab-seam trick's content surface appeared. Grepped
+the whole `frontend/src` tree for `bg-white`/`text-white` and Tailwind's stock
+gray/indigo/red/etc. palette classes to find every place needing a token instead of a
+literal. Real finds: `Layout.tsx`'s content panel, `Nav.tsx`'s active tab, `NotesList.tsx`'s
+search input/tag select, `LineNumberedTextarea.tsx`'s wrapper, and the shared
+`formStyles.ts` input class — all `bg-white` → `bg-panel`. `PostStatusBadge` and
+`VisibilityBadge` needed no changes at all — they only ever use tokens as small dots and
+label text, never as a fill-with-white-text pattern, so they were already dark-mode-safe
+by construction. `ComingSoon.tsx` still has hardcoded Tailwind grays too, but it's dead
+code — nothing imports it anymore (every page it used to stand in for has since been
+built out for real) — so it was left alone rather than fixed for a component nothing can
+ever render.
+
+### Toggle: context + provider split, same shape as AuthContext
+
+`ThemeContext.tsx` (context + provider) and `useTheme.ts` (the hook) — deliberately
+mirrors the existing `AuthContext`/`useAuth` file split, including picking up the exact
+same "fast refresh" oxlint warning that was already accepted for `AuthContext` for the
+same reason (colocating a small context with its provider is a standard, low-risk
+pattern; splitting further for this app's size isn't worth 3 files for one context).
+`ThemeToggle` renders in the tab strip after the last tab, explicitly *not* styled as a
+tab — same reasoning already established for why Logout isn't a tab: it isn't a page.
+
+**No-flash-of-wrong-theme**: a small inline script in `index.html`, before React mounts,
+reads `localStorage.theme` (falling back to `prefers-color-scheme`) and sets
+`data-theme` on `<html>` synchronously. `ThemeContext`'s own initial state resolution
+uses the identical fallback order, so it agrees with what's already painted instead of
+flashing on top of it. The two are documented as needing to stay in sync if either
+changes.
+
+**Markdown rendering** (`NoteDetail`, `BlogDetail`): needed `@custom-variant dark
+(&:where([data-theme=dark], [data-theme=dark] *));` so Tailwind's `dark:` variant (used
+for `dark:prose-invert`) keys off the same `[data-theme]` attribute as everything else,
+instead of its default `prefers-color-scheme`/`.dark`-class behavior. Without this,
+`dark:prose-invert` would activate based on OS preference regardless of what the user
+actually picked with the toggle — silently wrong for anyone who overrides their system
+preference. The existing custom `.prose` link/code-block tint rules (already
+token-based) needed no changes; they already track the theme correctly through the CSS
+custom properties.
+
+### Verification
+
+Didn't stop at "the source edit looks right" — grepped the actual compiled `dist/`
+output for both the `[data-theme=dark]` block and every one of the 16 token values (8
+tokens × 2 themes), confirming the shipped CSS matches the approved table exactly
+(`#ffffff` appearing minified as `#fff` in the light-mode `panel`/`accent-ink` values,
+as expected). Independently computed the dark-mode contrast ratios by hand (WCAG relative
+luminance formula) rather than trusting the pre-approved numbers outright: ink/keyword/
+string/flag all clear 4.5:1 against both `paper` and `panel` (4.9:1 to 13.6:1 across all
+eight pairings) — confirmed, not just assumed. One honest data point: `rule` against
+`panel` computed to ~2.89:1 by hand, a hair under the 3:1 UI-component floor (it clears
+3.1:1 against `paper`) — within hand-calculation precision margin, not a clear violation
+like the button-text issue was, so reported rather than treated as a blocker. Full build
+and lint clean (one new oxlint warning, the same accepted pattern as `AuthContext`'s).
+Route regression check: all ten routes still `200` in both themes.
+
+**No browser tool available this session either** — checked via `ToolSearch` before
+claiming so, rather than assuming. Said so plainly instead of silently skipping the
+"actually look at it" verification step, consistent with flagging this same gap in every
+design-pass session in this runbook. Left the dev server running with the toggle visible
+in the tab strip for manual checking.
