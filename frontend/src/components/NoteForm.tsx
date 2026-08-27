@@ -1,11 +1,17 @@
 import { useState, type FormEvent } from 'react'
 import type { Note, NotePayload, NoteVisibility } from '../api/types'
+import LineNumberedTextarea from './LineNumberedTextarea'
 
 type NoteFormProps = {
   initialNote?: Note
   onSubmit: (payload: NotePayload) => Promise<void>
   submitLabel: string
 }
+
+const inputClass =
+  'mt-1 block w-full rounded-md border border-rule bg-white px-3 py-2 font-body text-sm text-ink shadow-sm focus:border-keyword focus:outline-none'
+
+const labelClass = 'font-display text-xs tracking-wide text-ink/60 uppercase'
 
 export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFormProps) {
   const [title, setTitle] = useState(initialNote?.title ?? '')
@@ -41,9 +47,9 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-5">
       <div>
-        <label htmlFor="title" className="block text-sm font-medium text-gray-700">
+        <label htmlFor="title" className={labelClass}>
           Title
         </label>
         <input
@@ -52,58 +58,61 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
           required
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          className={inputClass}
         />
       </div>
 
       <div>
-        <label htmlFor="content" className="block text-sm font-medium text-gray-700">
+        <label htmlFor="content" className={labelClass}>
           Content (Markdown)
         </label>
-        <textarea
-          id="content"
-          required
-          rows={12}
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-        />
+        <div className="mt-1">
+          <LineNumberedTextarea
+            id="content"
+            required
+            rows={14}
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+          />
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
-          <label htmlFor="language" className="block text-sm font-medium text-gray-700">
+          <label htmlFor="language" className={labelClass}>
             Language (optional)
           </label>
           <input
             id="language"
             type="text"
-            placeholder="e.g. php, javascript"
+            placeholder="php, javascript…"
             value={language}
             onChange={(event) => setLanguage(event.target.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className={`${inputClass} font-display`}
           />
         </div>
         <div>
-          <span className="block text-sm font-medium text-gray-700">Visibility</span>
-          <div className="mt-2 flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-gray-700">
+          <span className={labelClass}>Visibility</span>
+          <div className="mt-2.5 flex gap-5">
+            <label className="flex items-center gap-2 font-body text-sm text-ink">
               <input
                 type="radio"
                 name="visibility"
                 value="private"
                 checked={visibility === 'private'}
                 onChange={() => setVisibility('private')}
+                className="accent-ink"
               />
               Private
             </label>
-            <label className="flex items-center gap-2 text-sm text-gray-700">
+            <label className="flex items-center gap-2 font-body text-sm text-ink">
               <input
                 type="radio"
                 name="visibility"
                 value="public"
                 checked={visibility === 'public'}
                 onChange={() => setVisibility('public')}
+                className="accent-string"
               />
               Public
             </label>
@@ -112,7 +121,7 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
       </div>
 
       <div>
-        <label htmlFor="tags" className="block text-sm font-medium text-gray-700">
+        <label htmlFor="tags" className={labelClass}>
           Tags (comma-separated)
         </label>
         <input
@@ -121,18 +130,22 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
           placeholder="php, laravel"
           value={tagsInput}
           onChange={(event) => setTagsInput(event.target.value)}
-          className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          className={`${inputClass} font-display`}
         />
       </div>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && (
+        <p className="rounded-md border border-flag/30 bg-flag/5 px-3 py-2 font-body text-sm text-ink">
+          {error}
+        </p>
+      )}
 
       <button
         type="submit"
         disabled={submitting}
-        className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+        className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
       >
-        {submitting ? 'Saving…' : submitLabel}
+        {submitting ? 'saving…' : submitLabel}
       </button>
     </form>
   )

@@ -1,20 +1,17 @@
 import type { Note } from '../api/types'
 import TagPills from './TagPills'
 
-export default function NoteCard({ note }: { note: Note }) {
+export default function NoteCard({ note, index }: { note: Note; index: number }) {
   return (
-    <div className="rounded-md border border-gray-200 p-4">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-medium text-gray-900">{note.title}</h3>
-        {note.language && (
-          <span className="rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
-            {note.language}
-          </span>
-        )}
-      </div>
-      <div className="mt-2">
-        <TagPills tags={note.tags} />
-      </div>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3">
+      <span className="w-6 shrink-0 select-none text-right font-display text-xs text-ink/30">
+        {String(index + 1).padStart(2, '0')}
+      </span>
+      <span className="min-w-0 flex-1 truncate font-display text-sm text-ink">{note.title}</span>
+      {note.language && (
+        <span className="shrink-0 font-display text-xs text-ink/40">[{note.language}]</span>
+      )}
+      <TagPills tags={note.tags} />
     </div>
   )
 }

@@ -47,7 +47,10 @@ export default function NoteForm() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900">
+      <p className="font-display text-xs text-ink/40">
+        {isEditing ? `~/notes/${id}.md` : '~/notes/new.md'}
+      </p>
+      <h1 className="mt-1 font-display text-xl font-semibold text-ink">
         {isEditing ? 'Edit note' : 'New note'}
       </h1>
       <div className="mt-6">
@@ -59,15 +62,19 @@ export default function NoteForm() {
       </div>
 
       {isEditing && (
-        <div className="mt-8 border-t border-gray-200 pt-6">
-          {deleteError && <p className="mb-3 text-sm text-red-600">{deleteError}</p>}
+        <div className="mt-8 border-t border-rule pt-6">
+          {deleteError && (
+            <p className="mb-3 rounded-md border border-flag/30 bg-flag/5 px-3 py-2 font-body text-sm text-ink">
+              {deleteError}
+            </p>
+          )}
           <button
             type="button"
             onClick={handleDelete}
             disabled={deleting}
-            className="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+            className="rounded-md border border-flag/40 px-4 py-2 font-display text-sm font-medium text-flag hover:bg-flag/5 disabled:opacity-50"
           >
-            {deleting ? 'Deleting…' : 'Delete note'}
+            {deleting ? 'deleting…' : 'Delete note'}
           </button>
         </div>
       )}

@@ -17,17 +17,14 @@ export default function NoteDetail() {
 
   return (
     <div>
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-2xl font-semibold text-gray-900">{note.title}</h1>
-        {note.language && (
-          <span className="rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
-            {note.language}
-          </span>
-        )}
-      </div>
-      <div className="mt-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rule pb-3">
+        <p className="font-display text-xs text-ink/40">
+          ~/notes/{note.id}.md
+          {note.language && <span className="text-ink/60"> [{note.language}]</span>}
+        </p>
         <TagPills tags={note.tags} />
       </div>
+      <h1 className="mt-4 font-display text-xl font-semibold text-ink">{note.title}</h1>
       <div className="prose mt-6 max-w-none">
         {/*
           NEVER add rehype-raw (or any plugin enabling raw HTML passthrough)

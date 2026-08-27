@@ -5,11 +5,12 @@ export default function VisibilityBadge({ visibility }: { visibility: NoteVisibi
 
   return (
     <span
-      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-        isPublic ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-700'
+      className={`inline-flex items-center gap-1.5 font-display text-xs ${
+        isPublic ? 'text-string' : 'text-ink/45'
       }`}
     >
-      {isPublic ? 'Public' : 'Private'}
+      <span className={`h-1.5 w-1.5 rounded-full ${isPublic ? 'bg-string' : 'bg-ink/30'}`} />
+      {isPublic ? 'public' : 'private'}
     </span>
   )
 }

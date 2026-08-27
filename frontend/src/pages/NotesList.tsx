@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { listPublicNotes } from '../api/notes'
 import { listTags } from '../api/tags'
@@ -23,10 +23,8 @@ export default function NotesList() {
     setSearchInput(search)
   }
 
-  const [tags, setTags] = useState<Tag[]>([])
-  useEffect(() => {
-    listTags().then(setTags).catch(() => setTags([]))
-  }, [])
+  const tagsState = useFetch(() => listTags(), [])
+  const tags: Tag[] = tagsState.status === 'success' ? tagsState.data : []
 
   const state = useFetch(() => listPublicNotes({ search, tag }), [search, tag])
 
@@ -56,54 +54,55 @@ export default function NotesList() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900">Notes</h1>
+      <p className="font-display text-xs text-ink/40">~/notes.md</p>
+      <h1 className="mt-1 font-display text-xl font-semibold text-ink">Notes</h1>
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <form onSubmit={handleSearchSubmit} className="flex gap-2">
           <input
             type="search"
-            placeholder="Search notes…"
+            placeholder="grep…"
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            className="rounded-md border border-rule bg-white px-3 py-1.5 font-display text-sm text-ink placeholder:text-ink/30 focus:border-keyword focus:outline-none"
           />
           <button
             type="submit"
-            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+            className="rounded-md border border-rule px-3 py-1.5 font-display text-sm text-ink/70 hover:border-keyword hover:text-keyword"
           >
-            Search
+            search
           </button>
         </form>
 
         <select
           value={tag}
           onChange={(event) => handleTagChange(event.target.value)}
-          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          className="rounded-md border border-rule bg-white px-3 py-1.5 font-display text-sm text-ink focus:border-keyword focus:outline-none"
         >
-          <option value="">All tags</option>
+          <option value="">all tags</option>
           {tags.map((t) => (
             <option key={t.id} value={t.slug}>
-              {t.name}
+              #{t.name}
             </option>
           ))}
         </select>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4 divide-y divide-rule border-t border-rule">
         {state.status === 'loading' && <LoadingState />}
         {state.status === 'error' && <ErrorState message={state.message} />}
         {state.status === 'success' && (
           <>
             {state.data.data.length === 0 ? (
-              <p className="py-8 text-center text-gray-500">No notes found.</p>
+              <p className="py-12 text-center font-display text-sm text-ink">
+                <span className="text-ink/35">// </span>no notes found
+              </p>
             ) : (
-              <div className="space-y-3">
-                {state.data.data.map((note) => (
-                  <Link key={note.id} to={`/notes/${note.id}`} className="block">
-                    <NoteCard note={note} />
-                  </Link>
-                ))}
-              </div>
+              state.data.data.map((note, index) => (
+                <Link key={note.id} to={`/notes/${note.id}`} className="block hover:bg-paper/60">
+                  <NoteCard note={note} index={index} />
+                </Link>
+              ))
             )}
           </>
         )}

@@ -1,2 +1,52 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
+
+@theme {
+  /* devnotes design tokens — see docs/server-setup-runbook.md for rationale */
+  --color-paper: #f6f7fa;
+  --color-ink: #1b2430;
+  --color-rule: #dee2e9;
+  --color-keyword: #3555d8;
+  --color-string: #1f8a5f;
+  --color-flag: #c23b3b;
+
+  --font-display: 'IBM Plex Mono', ui-monospace, monospace;
+  --font-body: 'IBM Plex Sans', ui-sans-serif, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-paper text-ink font-body;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-keyword);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* Light-touch tint of the typography plugin's defaults to match the
+   token system, rather than its stock indigo/gray. */
+.prose :where(a):not(:where([class~='not-prose'] *)) {
+  color: var(--color-keyword);
+}
+.prose :where(code):not(:where([class~='not-prose'] *)) {
+  font-family: var(--font-display);
+  background-color: var(--color-paper);
+  border-radius: 0.25rem;
+  padding: 0.15em 0.4em;
+}
+.prose :where(code)::before,
+.prose :where(code)::after {
+  content: none;
+}
