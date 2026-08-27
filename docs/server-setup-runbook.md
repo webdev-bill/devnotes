@@ -141,6 +141,13 @@ reboot
 - [ ] Add pagination controls to the notes list pages (`/notes` and `/my/notes`)
       — deliberately deferred in the 2026-08-26 notes/blog pages session, both
       currently only render the first page of API results
+- [ ] Add pagination controls to the blog list pages (`/blog` and `/my/blog`) —
+      same deferral, same reason, from the 2026-08-27 blog pages session
+- [ ] Add scheduled-publishing UI to the blog post form — the backend already
+      supports a future `published_at` (`/my/blog-posts` accepts any date), but
+      the frontend's publish control only offers "now" or "never" (draft).
+      Deliberately deferred in the 2026-08-27 blog pages session in favor of
+      the simpler two-button draft/publish pair
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -821,3 +828,84 @@ compiled CSS for the new width utilities and background tokens, and route regres
 checks, same rigor as before. The actual pixel-level correctness of the seam still
 depends on the user's live check, which is what surfaced these two issues in the first
 place — this is exactly the loop that limitation is supposed to run through.
+
+## 2026-08-27 — Real Blog Pages: List, Detail, Dashboard, Draft/Publish
+
+Replaced the `/blog`, `/blog/:slug`, `/my/blog` (+ create/edit) placeholders with real
+pages, following the same propose-then-build flow as the notes pages session — reusing
+the design system and shared infrastructure (`useFetch`, `LoadingState`/`ErrorState`,
+`LineNumberedTextarea`, the directory-listing/tab-strip patterns) rather than inventing
+parallel versions of any of it.
+
+### New pieces, and why they couldn't just reuse the notes ones
+
+- `BlogPostCard` — same directory-listing row shape as `NoteCard`, but shows a published
+  date instead of `[language]`/`#tags`, since posts have neither.
+- `PostStatusBadge` — **three** states (draft / scheduled / published), not two, because
+  the backend already supports a future `published_at` for scheduling even though the UI
+  doesn't expose scheduling yet (see backlog item below). Styled identically to
+  `VisibilityBadge` (dot + label, same tokens) but a distinct component since the shape
+  genuinely differs — forcing a boolean-shaped component to represent three states would
+  have been worse than a small, consistent duplicate.
+- `BlogForm` — structurally like `NoteForm`, but the publish control is the one real UI
+  decision this session (see below), and there's no visibility radio or tags field —
+  blog posts have neither.
+- Extracted `components/formStyles.ts` (`inputClass`, `labelClass`) out of `NoteForm` and
+  `Login` — `BlogForm` would have been a third copy-paste of the exact same classNames,
+  which crossed the line into "this is now a real duplication problem," not "premature
+  abstraction."
+
+### Publish/draft control
+
+Two buttons, state-dependent on whether the post being edited already has a
+`published_at`:
+
+- **New or draft**: `Save draft` (submits `published_at: null`) / `Publish` (submits
+  `published_at: <now>`).
+- **Already published**: `Save changes` (keeps the existing `published_at` untouched) /
+  `Unpublish` (submits `published_at: null`) — added on the user's confirmation that
+  publish shouldn't be a one-way door in the UI just because it wasn't explicitly
+  requested.
+
+**Deliberate safety choice, not just styling:** neither button is `type="submit"`. The
+form's own `onSubmit` just calls `preventDefault()` and does nothing — every action fires
+from an explicit `onClick`. Reasoning: pressing Enter while typing in the title field
+triggers a form's default submit in a single-line input (unlike a textarea, where Enter
+just inserts a newline), and publishing a post is a real, visible consequence — not
+something that should happen because someone hit Enter mid-sentence titling their draft.
+
+Scheduling (a future `published_at`) was **not** built into the UI this session, even
+though the backend already supports it — the two-button pair is simpler and covers the
+actual ask; scheduling is logged to the "still to do" list below rather than silently
+dropped.
+
+### Nav and routing changes (both flagged and confirmed before building)
+
+- Nav's single `~/dashboard.md` tab became two: `~/my-notes.md` and `~/my-blog.md`,
+  shown together when authenticated — mirrors the existing public `~/notes.md`/
+  `~/blog.md` pair rather than inventing a new nav concept. Without this, `/my/blog`
+  would have been reachable only by typing the URL directly.
+- Renamed the blog edit route param from `:id` to `:slug` (`/my/blog/:slug/edit`) — the
+  originally-approved route structure said `:id`, but `BlogPost`'s route-model binding is
+  slug-based everywhere in the backend, public and private, so the value actually flowing
+  through that segment was always a slug. Naming it accurately now avoids confusion later
+  rather than carrying forward a misleading param name.
+
+### Verification
+
+Build and lint clean (same single pre-existing `AuthContext` warning, nothing new). Live
+end-to-end test against the real API, mirroring exactly what `BlogForm`/`BlogDashboard`
+call: created a draft → confirmed it's excluded from the public list (`total: 0`) and
+404s on its public slug URL → confirmed it appears correctly on the authenticated
+dashboard with `published_at: null` → published it (`published_at` set to now) →
+confirmed it now appears publicly (`total: 1`, `200` on the slug URL) → unpublished it
+(`published_at` back to `null`) → confirmed it disappeared from the public list again and
+404s again → confirmed the route guard's server-side backing (`GET /my/blog-posts` with
+no auth → `401`, same fix from the notes session, still holding) → deleted the test post
+and confirmed both dashboards were left empty for manual UI checking. Route regression
+check on all four new paths, all `200`.
+
+**Same honest gap as every frontend session so far:** no browser tool available, so
+nobody has watched this render. The API-level flow above is as rigorous a check as I can
+do without one, but it's not the same claim as "the two-button state switch actually
+looks right once a post is published" — that's still the user's to confirm.
