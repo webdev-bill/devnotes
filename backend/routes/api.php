@@ -8,7 +8,7 @@ use App\Http\Controllers\Api\NoteController;
 use App\Http\Controllers\Api\TagController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/login', [AuthController::class, 'login']);
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:login');
 
 // --- Public, read-only. Only ever returns public notes / published posts. ---
 
