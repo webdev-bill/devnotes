@@ -131,7 +131,8 @@ reboot
 - Waited ~30-60 seconds, reconnected with `ssh devnotes` — successful.
 
 **Still to do (next session):**
-- [ ] Create a non-root user with sudo access
+- [x] Create a non-root user with sudo access — done 2026-08-27, see that
+      session's log below
 - [ ] Write docker-compose.yml (Laravel + React + Postgres)
 - [ ] Set up Traefik for reverse proxy + automatic HTTPS
 - [ ] Point Cloudflare DNS (A record) to the Droplet's IP
@@ -976,3 +977,53 @@ elements (the nav tabs) are untouched by that reset and keep the browser's nativ
 cursor, which is why the asymmetry was only visible on the logout button specifically.
 Fixed once at the root — `button:not(:disabled) { cursor: pointer; }` in the base layer —
 rather than patching `cursor-pointer` onto nine separate button classNames.
+
+## 2026-08-27 — Non-Root Sudo User on the Droplet
+
+DNS went live this session (`devnotes.billandrewsallao.com` → the Droplet's IP), which
+made deployment prep real rather than hypothetical — starting with the non-root user
+deferred all the way back in the initial server hardening (see the "Decisions Made Along
+the Way" note above: "stay on root through setup, create a dedicated user right before
+actual app deployment begins"). That moment arrived.
+
+Executed directly over SSH (root access confirmed working first via a read-only check —
+`whoami`/`hostname`/`os-release` — before changing anything):
+
+```bash
+adduser --disabled-password --gecos "" andrew
+usermod -aG sudo andrew
+mkdir -p /home/andrew/.ssh
+cp /root/.ssh/authorized_keys /home/andrew/.ssh/authorized_keys
+chown -R andrew:andrew /home/andrew/.ssh
+chmod 700 /home/andrew/.ssh
+chmod 600 /home/andrew/.ssh/authorized_keys
+```
+
+**Real decision, not just a technical step: sudo needs a password.** `adduser
+--disabled-password` is correct for an SSH-key-only account, but it also means the
+account has no password at all — and `sudo` on Ubuntu challenges for the *account's own
+local password* by default, separate from however you authenticated over SSH. Passing
+that through non-interactively (`sudo -l -U andrew` first, to verify the `(ALL : ALL)
+ALL` grant existed without needing any password) surfaced a real choice: passwordless
+`sudo` (NOPASSWD — defensible here since the SSH key already grants full root today via
+direct root login, so it wouldn't actually lower the current trust bar) vs. a real
+password (the standard DigitalOcean/Ubuntu convention, and stronger against a
+non-interactive process running as `andrew` silently escalating). **User chose the real
+password.** Couldn't be set by Claude Code non-interactively — `passwd` needs a genuine
+TTY and typing it through any automated channel would mean it got logged/seen somewhere,
+defeating the point — so the user ran `ssh devnotes "passwd andrew"` themselves,
+interactively, in their own terminal.
+
+**Verification, done deliberately as two separate steps** so a fallback existed at every
+point: confirmed `andrew`'s sudo *configuration* was correct before the password even
+existed (`sudo -l -U andrew` as root needs no target-user auth), then — after the
+password was set — the user independently confirmed `ssh -i ~/.ssh/devnotes_key
+andrew@<IP>` logs in and `sudo whoami` correctly prompts and returns `root`. Root SSH
+access was deliberately left untouched throughout (didn't disable root login, didn't
+replace the existing `Host devnotes` SSH config entry) until that end-to-end check passed
+— only after confirming did the user update their own `~/.ssh/config` to make `devnotes`
+default to `andrew` rather than `root`.
+
+**Not done yet, on purpose:** root password/SSH login itself hasn't been disabled server-
+side. That's the natural next hardening step now that the `andrew` account is proven to
+work, not something to rush ahead of verification.
