@@ -136,7 +136,8 @@ reboot
 - [ ] Write docker-compose.yml (Laravel + React + Postgres)
 - [ ] Set up Traefik for reverse proxy + automatic HTTPS
 - [ ] Point Cloudflare DNS (A record) to the Droplet's IP
-- [ ] Set up GitHub Actions for build + deploy
+- [x] Set up GitHub Actions for build + deploy — done and verified working
+      end-to-end 2026-08-27, see that session's log below
 - [ ] Configure Postgres backups to S3-compatible storage (e.g. Backblaze B2)
 - [ ] Write DEPLOYMENT.md — a from-scratch rebuild guide
 - [ ] Add pagination controls to the notes list pages (`/notes` and `/my/notes`)
@@ -156,6 +157,12 @@ reboot
       client clock drifting behind the server's (e.g. Docker Desktop's VM
       clock after a host sleep/resume) could silently schedule a post
       slightly in the future
+- [ ] Add real Docker healthchecks to `backend`/`frontend`/`traefik` in
+      `docker-compose.prod.yml` — currently only `db` has one, so
+      `docker compose up -d --build` doesn't actually wait for the app to be
+      ready, only started. `deploy.sh`'s health-check retry loop (added
+      2026-08-27) papers over this at the deploy-script level; real
+      healthchecks would fix it at the source instead
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -1322,3 +1329,146 @@ claiming so, rather than assuming. Said so plainly instead of silently skipping 
 "actually look at it" verification step, consistent with flagging this same gap in every
 design-pass session in this runbook. Left the dev server running with the toggle visible
 in the tab strip for manual checking.
+
+## 2026-08-27 — GitHub Actions CI/CD: Push-to-Deploy, Verified Working End-to-End
+
+Push to `main` now deploys to the Droplet automatically. Two new files
+(`.github/workflows/deploy.yml`, `deploy.sh`), a manual one-time server/GitHub setup the
+user did directly (per the standing credential boundary — Claude Code creates files and
+finds bugs, never touches SSH/keys/secrets), and one real race-condition bug found via an
+actual failed deploy and fixed with real local testing, not just reasoned about.
+
+### Architecture
+
+- **GitHub Actions doesn't do the deploy work itself** — the workflow (`appleboy/
+  ssh-action@v1.0.3`) just opens an SSH connection to the Droplet and sends a trivial
+  script (`echo "connecting..."`). The *real* deploy logic lives entirely in `deploy.sh`
+  on the server, invoked via an SSH **forced command** tied to the deploy key — meaning
+  whatever the Action actually sends over that connection is ignored; the server runs
+  `deploy.sh` regardless. This is a deliberate security boundary: even if the Action's
+  own script were somehow compromised or misconfigured, the SSH key it authenticates
+  with can only ever run one specific script, not arbitrary commands on the server.
+- **Scoped deploy key, not the existing admin key.** A dedicated SSH key exists solely
+  for this pipeline, separate from the `devnotes_key` used for interactive admin access
+  — narrower blast radius if the CI secret were ever exposed, and it can be rotated or
+  revoked independently of the key a human actually logs in with.
+- **Three GitHub Actions secrets** (`SSH_HOST`, `SSH_USER`, `DEPLOY_SSH_KEY`) hold what
+  the Action needs to connect. Referencing them by name in the workflow YAML is not
+  itself a secret-handling concern — the values live only in GitHub's encrypted secrets
+  store, never in the repo.
+- **Conditional migrations, not unconditional.** `deploy.sh` diffs `backend/database/
+  migrations` between the pre- and post-`git pull` commits and only runs `artisan
+  migrate --force` if that diff is non-empty — most deploys are just code changes, and
+  running a migration command (even a no-op one) on every single deploy is unnecessary
+  surface area.
+- **Manual setup the user performed directly, not witnessed by Claude Code**: generating
+  the dedicated deploy key, configuring the forced-command restriction on the server side
+  for that key, and adding the three GitHub secrets. Consistent with the standing
+  boundary established earlier — described here at the architecture level (above) since
+  that's what's actually verifiable from the resulting behavior, not as exact commands
+  Claude Code never saw run.
+
+### Two bugs found before the first real test, by reading the repo rather than trusting the given script
+
+The user handed over exact file contents to implement verbatim, but verification against
+the actual codebase (not the given script's assumptions about it) surfaced two real
+mistakes before anything ran:
+
+1. **Wrong migrations path.** The given script filtered the git diff on `database/
+   migrations`; this repo's migrations live at `backend/database/migrations`. As given,
+   the filter would never match anything — migrations would silently never run, on any
+   deploy, even when they genuinely changed. Confirmed by listing the real directory
+   before fixing, not assumed.
+2. **Wrong health-check URL, two compounding ways.** The given script checked
+   `/api/up`. Laravel's health route is registered at the bare path `/up`
+   (`health: '/up'` in `bootstrap/app.php`) — a route Laravel adds *outside* the `/api`
+   prefix entirely, so `/api/up` 404s. And even the corrected bare `/up` wouldn't have
+   reached the backend anyway: Traefik only routes `PathPrefix(/api)` to it (confirmed
+   by re-reading `docker-compose.prod.yml`'s own labels), so `/up` would hit the
+   frontend's catch-all instead — a false "healthy" signal that never actually checks
+   the backend. Fixed by checking `/api/tags` instead — a real, already-public,
+   lightweight endpoint that genuinely exercises the backend and its DB connection.
+
+Both fixes stayed within the two files being created — no need to touch
+`docker-compose.prod.yml` or anything else to correct either one.
+
+### Gotcha (recurrence): the executable bit didn't survive the Windows/WSL boundary
+
+Same issue as the gitleaks pre-commit hook script from an earlier session: `chmod +x
+deploy.sh` followed by `git add` still showed mode `100644` (not executable) in the git
+index — editing through the `\\wsl.localhost\...` UNC path from the Windows side doesn't
+reliably carry the executable bit across to git's view of the file. Fixed the same way as
+before: `git update-index --chmod=+x deploy.sh`, then verified via `git ls-files -s`
+showing `100755` before committing.
+
+### The real bug: a race condition, caught by an actual failed deploy
+
+First real end-to-end test: build, container recreation, and the conditional migration
+check all succeeded — only the final health check failed, `curl` exit 22 (HTTP error
+status). User's diagnosis: a race condition, not an application bug. Confirmed structurally
+before writing any fix: `db` has a Docker healthcheck and `backend` depends on it via
+`condition: service_healthy`, but `backend`/`frontend`/`traefik` themselves have **no
+healthcheck defined at all** in `docker-compose.prod.yml`. `docker compose up -d --build`
+only waits for a container to be *started*, not *ready* — for a service with no
+healthcheck, Compose has no way to tell the difference, so the very next line (`curl`)
+raced against PHP-FPM/nginx startup (and possibly Traefik's own Docker-provider discovery
+of the recreated container, which also isn't instant).
+
+**Discussed reasoning before implementing**, per the user's explicit request — not just
+building a fix silently:
+- A fixed `sleep N` has to be sized for the worst case, paying that full cost on *every*
+  deploy even when the container is ready in under a second (the common case), and still
+  fails if a deploy is ever slower than N for any reason.
+- A retry loop succeeds the moment the service is actually ready, and covers more than
+  one possible cause of the delay (FPM cold start, Traefik reconfig lag, transient CPU
+  contention from the rebuild itself) rather than one assumed cause with one assumed
+  duration.
+- A more thorough fix exists — real Docker healthchecks on `backend`/`frontend`/
+  `traefik` in `docker-compose.prod.yml`, so `up -d --build` itself wouldn't return until
+  they're actually healthy — but that touches a file outside this task's scope, so it's
+  noted as a future option rather than done now (see "still to do" below).
+
+Implemented: up to 6 attempts, 3 seconds apart (≈18s worst case), printing the actual
+HTTP status on each failed attempt so a genuine failure is debuggable in the Action log
+rather than just "it didn't work."
+
+**A second real bug, caught only because the fix was actually tested, not just read
+over:** the first draft's fallback for "curl couldn't connect at all" was
+`status=$(curl ... || echo "000")`. curl itself already prints its own `000` via `-w`
+when there's no response to report a code for (e.g. connection refused) — that print
+happens regardless of curl's own nonzero exit, so the `|| echo "000"` fired *in addition*,
+and both landed in the same command substitution: `000` + `000` concatenated into
+`000000`. Caught this by actually running the loop against three real scenarios (a
+working endpoint, a 404, and an unreachable host) rather than trusting the logic by
+inspection — the connection-refused case printed the concatenated value immediately.
+Fixed as a clean statement-level fallback instead of a piped one:
+`status=$(curl ...) || status="000"` — on failure this reassigns the variable outright
+rather than appending a second command's output into the same capture. Re-ran all three
+scenarios after the fix to confirm, not just after the first attempt.
+
+Also reverted an unrelated line-ending-only change to `README.md` that was already staged
+from the user's IDE (same artifact as the very first scaffolding session) — kept out of
+the fix commit rather than bundled in by accident.
+
+### Final verification — real pipeline run, checked at the job/step level, not assumed from a green checkmark
+
+Pushed a genuine small change (a README line documenting the auto-deploy behavior itself
+— not an empty/fake commit) specifically to re-trigger the pipeline and confirm the fix.
+`gh` CLI wasn't installed in this environment; used the public GitHub REST API directly
+instead (unauthenticated — this repo is public, so read access to Actions run data didn't
+need credentials, consistent with the standing boundary against handling auth). Checked
+not just the top-level run conclusion but the job/step breakdown: run `b044e17`,
+conclusion `success`, completed in 14 seconds. The single "Trigger deploy via SSH" step
+runs `deploy.sh` in its entirety on the server — build, migration check, and the health
+check retry loop all execute inside that one step — so its `success` conclusion means the
+script reached its final `echo "Deploy succeeded"` line, which only happens if the health
+check passed within the retry window. Attempted to pull the actual step log content for
+full transparency on whether a retry fired or it passed on the first attempt; the log
+endpoint requires authenticated admin access, which wasn't available (and wouldn't be
+used even if it were, per the standing boundary) — the job-level result is authoritative
+enough without it.
+
+**Still to do:** the more thorough fix mentioned above — real Docker healthchecks on
+`backend`/`frontend`/`traefik` in `docker-compose.prod.yml` so `up -d --build` itself
+waits for readiness, rather than relying on the deploy script's own retry loop to paper
+over the gap every time.
