@@ -1,14 +1,56 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* Tell Tailwind's `dark:` variant to key off our own [data-theme] attribute
+   instead of its default (prefers-color-scheme media query / .dark class) —
+   needed so `dark:prose-invert` (and any other dark: utility) activates
+   under the same attribute ThemeContext/the no-flash script set. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* Raw token values, theme-switchable. Kept separate from the @theme block
+   below (rather than redefining @theme's variables directly under
+   [data-theme="dark"]) per Tailwind v4's documented pattern for CSS-variable
+   theming — @theme aliases these rather than owning the values itself. */
+:root {
+  --paper: #f6f7fa;
+  --panel: #ffffff;
+  --ink: #1b2430;
+  --rule: #dee2e9;
+  --keyword: #3555d8;
+  --string: #1f8a5f;
+  --flag: #c23b3b;
+  /* Foreground for text sitting on a solid accent fill (filled buttons) —
+     distinct from `ink`, which is foreground-on-paper/panel. White works
+     fine on light mode's saturated accent fills; dark mode's accent tokens
+     are deliberately lighter (so they read as *text* on dark backgrounds),
+     which means white-on-accent-fill would fail contrast there — so this
+     flips to a dark ink tone in dark mode instead. See
+     docs/server-setup-runbook.md for the contrast numbers that ruled out
+     keeping text-white unconditionally. */
+  --accent-ink: #ffffff;
+}
+
+[data-theme='dark'] {
+  --paper: #1a1d24;
+  --panel: #20242c;
+  --ink: #e4e7ee;
+  --rule: #5c6a8c;
+  --keyword: #7c93f5;
+  --string: #4fbe8b;
+  --flag: #e5696a;
+  --accent-ink: #1b2430;
+}
+
 @theme {
   /* devnotes design tokens — see docs/server-setup-runbook.md for rationale */
-  --color-paper: #f6f7fa;
-  --color-ink: #1b2430;
-  --color-rule: #dee2e9;
-  --color-keyword: #3555d8;
-  --color-string: #1f8a5f;
-  --color-flag: #c23b3b;
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-rule: var(--rule);
+  --color-keyword: var(--keyword);
+  --color-string: var(--string);
+  --color-flag: var(--flag);
+  --color-accent-ink: var(--accent-ink);
 
   --font-display: 'IBM Plex Mono', ui-monospace, monospace;
   --font-body: 'IBM Plex Sans', ui-sans-serif, sans-serif;
@@ -45,7 +87,10 @@
 }
 
 /* Light-touch tint of the typography plugin's defaults to match the
-   token system, rather than its stock indigo/gray. */
+   token system, rather than its stock indigo/gray. Layered on top of
+   dark:prose-invert (applied per-usage in NoteDetail/BlogDetail) — these
+   two properties already track the theme via the custom properties above,
+   so they don't need their own dark-mode override. */
 .prose :where(a):not(:where([class~='not-prose'] *)) {
   color: var(--color-keyword);
 }

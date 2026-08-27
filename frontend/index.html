@@ -11,6 +11,26 @@
       rel="stylesheet"
     />
     <title>devnotes</title>
+    <script>
+      // Runs before React mounts so there's no flash of the wrong theme on
+      // load. Same storage key and resolution order as ThemeContext — keep
+      // the two in sync if either changes.
+      (function () {
+        try {
+          var stored = localStorage.getItem('theme');
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) {
+          // localStorage/matchMedia unavailable (rare) — fall back to light,
+          // same as the no-preference default everywhere else.
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

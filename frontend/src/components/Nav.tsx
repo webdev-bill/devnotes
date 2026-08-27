@@ -1,5 +1,6 @@
 import { NavLink, useNavigate } from 'react-router'
 import { useAuth } from '../context/useAuth'
+import ThemeToggle from './ThemeToggle'
 
 const tabClass =
   'inline-flex items-center gap-2 rounded-t-md px-3 py-2 font-display text-xs transition-colors'
@@ -10,7 +11,7 @@ function Tab({ to, label }: { to: string; label: string }) {
       to={to}
       className={({ isActive }) =>
         `${tabClass} ${
-          isActive ? 'bg-white text-ink' : 'text-ink/45 hover:bg-white/50 hover:text-ink/70'
+          isActive ? 'bg-panel text-ink' : 'text-ink/45 hover:bg-panel/50 hover:text-ink/70'
         }`
       }
     >
@@ -34,7 +35,7 @@ export default function Nav() {
   }
 
   return (
-    // Same background as the outer page (`paper`), so the ACTIVE tab (bg-white)
+    // Same background as the outer page (`paper`), so the ACTIVE tab (bg-panel)
     // is the only thing here that shares a color with the content panel below
     // it — that shared color, meeting with zero gap, is what makes it read as
     // one continuous surface rather than a border-matching trick that has to
@@ -57,6 +58,8 @@ export default function Nav() {
         ) : (
           <Tab to="/login" label="~/login.sh" />
         )}
+        {/* Not styled as a tab — same reasoning as Logout below: it isn't a page. */}
+        <ThemeToggle />
       </div>
       {isAuthenticated && (
         <button

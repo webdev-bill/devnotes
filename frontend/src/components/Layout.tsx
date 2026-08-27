@@ -10,7 +10,7 @@ export default function Layout() {
             see Nav.tsx for why that's what makes the seam disappear. */}
         <div className="overflow-hidden rounded-lg border border-rule shadow-sm">
           <Nav />
-          <main className="bg-white p-6 sm:p-8">
+          <main className="bg-panel p-6 sm:p-8">
             <Outlet />
           </main>
         </div>

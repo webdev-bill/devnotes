@@ -74,7 +74,7 @@ export default function BlogForm({ initialPost, onSubmit }: BlogFormProps) {
               type="button"
               disabled={submitting}
               onClick={() => submit(initialPost.published_at)}
-              className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-accent-ink transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {submitting ? 'saving…' : 'Save changes'}
             </button>
@@ -101,7 +101,7 @@ export default function BlogForm({ initialPost, onSubmit }: BlogFormProps) {
               type="button"
               disabled={submitting}
               onClick={() => submit(new Date().toISOString())}
-              className="rounded-md bg-string px-4 py-2 font-display text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="rounded-md bg-string px-4 py-2 font-display text-sm font-medium text-accent-ink transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {submitting ? 'publishing…' : 'Publish'}
             </button>

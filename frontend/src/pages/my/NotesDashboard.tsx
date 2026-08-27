@@ -37,7 +37,7 @@ export default function NotesDashboard() {
         </div>
         <Link
           to="/my/notes/new"
-          className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-white transition-opacity hover:opacity-90"
+          className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-accent-ink transition-opacity hover:opacity-90"
         >
           + new note
         </Link>

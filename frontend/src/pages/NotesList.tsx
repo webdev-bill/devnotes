@@ -64,7 +64,7 @@ export default function NotesList() {
             placeholder="grep…"
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
-            className="rounded-md border border-rule bg-white px-3 py-1.5 font-display text-sm text-ink placeholder:text-ink/30 focus:border-keyword focus:outline-none"
+            className="rounded-md border border-rule bg-panel px-3 py-1.5 font-display text-sm text-ink placeholder:text-ink/30 focus:border-keyword focus:outline-none"
           />
           <button
             type="submit"
@@ -77,7 +77,7 @@ export default function NotesList() {
         <select
           value={tag}
           onChange={(event) => handleTagChange(event.target.value)}
-          className="rounded-md border border-rule bg-white px-3 py-1.5 font-display text-sm text-ink focus:border-keyword focus:outline-none"
+          className="rounded-md border border-rule bg-panel px-3 py-1.5 font-display text-sm text-ink focus:border-keyword focus:outline-none"
         >
           <option value="">all tags</option>
           {tags.map((t) => (

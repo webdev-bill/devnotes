@@ -23,7 +23,7 @@ export default function BlogDetail() {
       <h1 className="mt-4 font-display text-xl font-semibold text-ink">{post.title}</h1>
       {/* Same constraint as NoteDetail — no rehype-raw, no raw HTML
           passthrough. See CLAUDE.md. */}
-      <div className="prose mt-6 max-w-2xl">
+      <div className="prose dark:prose-invert mt-6 max-w-2xl">
         <ReactMarkdown>{post.content}</ReactMarkdown>
       </div>
     </div>

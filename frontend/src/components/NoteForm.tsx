@@ -139,7 +139,7 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
       <button
         type="submit"
         disabled={submitting}
-        className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+        className="rounded-md bg-keyword px-4 py-2 font-display text-sm font-medium text-accent-ink transition-opacity hover:opacity-90 disabled:opacity-50"
       >
         {submitting ? 'saving…' : submitLabel}
       </button>

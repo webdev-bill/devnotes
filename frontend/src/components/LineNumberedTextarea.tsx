@@ -21,7 +21,7 @@ export default function LineNumberedTextarea({ value, onScroll, ...props }: Prop
   }
 
   return (
-    <div className="flex overflow-hidden rounded-md border border-rule bg-white font-display text-sm">
+    <div className="flex overflow-hidden rounded-md border border-rule bg-panel font-display text-sm">
       <div
         ref={gutterRef}
         aria-hidden="true"
