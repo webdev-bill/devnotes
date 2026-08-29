@@ -100,11 +100,18 @@ docker cp "$DUMP_PATH" "${CONTAINER_NAME}:/tmp/restore.dump"
 
 echo "Restoring..."
 docker exec "$CONTAINER_NAME" \
-  pg_restore -U restore -d restore --clean --if-exists /tmp/restore.dump || true
+  pg_restore -U restore -d restore --clean --if-exists --no-owner /tmp/restore.dump || true
 # `|| true`: pg_restore routinely exits non-zero on harmless notices (e.g.
 # "does not exist, skipping" from --if-exists on a fresh database with
 # nothing to drop yet) even when the restore itself succeeded. The row
 # counts below are the actual correctness signal, not this exit code.
+# `--no-owner`: without it, pg_restore tries to ALTER OWNER every restored
+# object to match the production role recorded in the dump (e.g.
+# "devnotes"), which doesn't exist in this throwaway container — only
+# "restore" does — producing a wall of harmless "role does not exist"
+# warnings on every run. Ownership doesn't matter here anyway; this
+# container exists purely for verification, and "restore" (a superuser)
+# can already read everything regardless of recorded ownership.
 
 echo
 echo "Row counts in restored database:"
