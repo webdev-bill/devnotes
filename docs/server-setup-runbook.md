@@ -1628,3 +1628,132 @@ dev-only CVEs are silently dismissed by this preset by design, before they ever 
 an alert to review. A second preset, **"Dismiss package malware alerts,"** is also present
 on the repo but is disabled — consistent with malware alerts being left off overall per
 the decision above.
+
+## 2026-08-30 — Encrypted Postgres Backups to Backblaze B2
+
+Automated, encrypted, off-server backups of the production Postgres database, uploaded to
+Backblaze B2 daily via cron. Full design was proposed and approved before any code was
+written; both scripts and their `.env.production.example` placeholders were reviewed via
+`git diff` for hardcoded secrets before every commit, per the standing rule. Verified fully
+end to end: real backup uploaded, real restore into a throwaway container, real data back.
+
+### scripts/backup-db.sh
+
+`docker compose exec -T db pg_dump -Fc` piped directly into `gpg --symmetric --cipher-algo
+AES256`, uploaded to B2 via the official `b2` CLI, guarded by `flock` against overlapping
+runs. The encrypted `.gpg` file only ever exists inside a `mktemp -d` directory cleaned up
+by a `trap ... EXIT`, and is deleted the moment the upload finishes — the unencrypted dump
+never touches disk anywhere, at any point; the `pg_dump | gpg` pipe is in-memory only.
+
+**No database password ever touches this host's process list.** The original plan assumed
+passing `DB_PASSWORD` to `pg_dump` via `docker compose exec -e PGPASSWORD=...`, but that
+would put the password in this host's own `ps aux` output for the duration of the command
+— the exact class of leak the plan was already explicit about avoiding for the gpg
+passphrase (`--passphrase-fd`, never `--passphrase`). Instead, `pg_dump` runs inside the
+container with no `-h`/`PGPASSWORD` at all, connecting over the local Unix socket, which
+the official postgres image trusts by default — so the script sources `.env.production` in
+full as planned, but `DB_PASSWORD` is simply never passed to any command.
+
+The gpg passphrase reaches `gpg` only via an anonymous fd from process substitution
+(`--passphrase-fd 3 3< <(printf '%s' "$BACKUP_ENCRYPTION_PASSPHRASE")`) — never `argv`,
+never a plaintext file. `--pinentry-mode loopback` added on both the backup and restore
+sides so gpg never tries to invoke an interactive pinentry prompt in a non-interactive
+cron/script context.
+
+### A real naming mismatch caught during the first live run, not the propose step
+
+The approved plan named the B2 key-ID variable `B2_KEY_ID`. During the propose step I
+flagged that the official `b2` CLI actually reads `B2_APPLICATION_KEY_ID` /
+`B2_APPLICATION_KEY` from the environment specifically — not `B2_KEY_ID` — and renamed it
+in the script and `.env.production.example` accordingly. The real `.env.production` on the
+server, though, had already been set up earlier using the original plan's name before that
+renaming was settled, so the first live backup attempt failed cleanly with `b2`'s own
+"Please provide both B2_APPLICATION_KEY and B2_APPLICATION_KEY_ID" error. Fixed by renaming
+the variable (same value) in `.env.production` on the server — no code change needed, since
+the repo's copy was already correct. `B2_BUCKET_ID` was added to `.env.production.example`
+per the plan but isn't consumed by either script — `b2 file upload`/`download` take the
+bucket name, not its ID — kept only for reference when looking the bucket up in the B2
+console.
+
+### scripts/restore-db.sh — and the write-only key becoming the standard DR process
+
+Decrypts a given backup and `pg_restore`s it into a brand-new one-off `postgres:16`
+container (`docker run --rm`, no volume, no shared compose project) — never the production
+`db` service or its `db_data` volume. This is a structural guarantee, not a convention:
+the throwaway container shares no compose project, no volume, and no server process with
+production, so there's no flag or typo that could reach real data.
+
+The B2 application key used for backups is scoped write-only — it can upload but cannot
+list, read, or delete objects. This was verified for real, not assumed: the first restore
+attempt genuinely failed with an "unauthorized" error the moment `restore-db.sh` tried its
+`b2 file download` fallback, proving the key's scope is enforced by B2, not just configured
+and untested.
+
+That failure led to the actual disaster-recovery process, which turned out stronger than
+the original plan: **download the backup manually through an authenticated B2 console
+session (Browse Files), scp it to the server, and let `restore-db.sh` find it locally.**
+The script checks for `<backup-filename>` in the repo root before ever calling `b2 file
+download`; if it's present, B2 is never contacted at all. This means real disaster recovery
+never requires minting a read-capable B2 API key, even temporarily — a stronger security
+posture than the original plan, which assumed the restore script itself would always
+authenticate to B2 for retrieval. The `b2 file download` fallback still exists in the
+script purely for convenience in a dev/test setup where a broader-scoped key happens to be
+configured; production has no such key and is expected to always use the local-file path.
+
+### Bug #1: a Postgres startup race, caught and fixed with real evidence, not just a retry added blindly
+
+The first real restore attempt got through decryption, container start, and file copy, then
+failed on `pg_restore` with `FATAL: database "restore" does not exist`. The immediate
+assumption — that the script never created the database — was wrong: `POSTGRES_DB=restore`
+does create it automatically. The actual cause was confirmed by watching `docker logs`
+timestamps on a real container: the official postgres image runs an internal *temporary*
+server during first-run initialization to execute setup (including the `CREATE DATABASE`
+for `POSTGRES_DB`), which accepts connections **before** that setup has actually finished.
+On a real run here, the temp server reported "ready to accept connections" at T+0ms, but
+`CREATE DATABASE` didn't execute until T+690ms — a real ~690ms window where the script's
+`pg_isready` check would report ready while the target database still didn't exist. A
+second ~590ms gap follows immediately after, where neither the temp nor the final server is
+listening at all, during the handoff between them.
+
+Fixed by replacing the `pg_isready` poll with a loop that retries an idempotent `CREATE
+DATABASE restore` directly (treating "already exists" as success) — this survives both
+gaps without depending on the image's internal init timing at all, since the loop just
+keeps retrying through the dead gap and succeeds against whichever server generation
+happens to be up. Verified empirically, not just reasoned about: reproduced the race
+directly by exec-ing into containers and inspecting `docker logs` for the exact timestamps
+above, then ran the new retry loop against multiple fresh throwaway containers and
+confirmed it consistently needed 2–3 attempts before succeeding, matching the measured gap.
+
+### Bug #2 (cosmetic, fixed): ownership warnings on every restore
+
+`pg_restore` tries to `ALTER OWNER` every restored object to match the production role
+recorded in the dump (e.g. `devnotes`), which doesn't exist in the throwaway container —
+only `restore` does — producing ~22 harmless "role does not exist" warnings on every run.
+Non-blocking, but risked burying a real error among expected noise on a future run. Added
+`--no-owner` to the `pg_restore` call: ownership doesn't matter for a container that exists
+purely for verification, and `restore` (a superuser) can already read everything regardless
+of recorded ownership.
+
+### Final verification
+
+- Real automated backup: `pg_dump | gpg` pipeline succeeded, uploaded to B2, confirmed via
+  the B2 console.
+- Real restore: backup manually downloaded via B2 console + scp, decrypted, restored into a
+  throwaway container, `pg_restore` completed successfully. Row counts came back as 0 across
+  all tables, because production held no data at the time of this test — the restore code
+  path doesn't branch on row count, so this is sufficient proof the mechanism itself works;
+  it doesn't yet prove large/complex data survives the round trip, which the next real
+  production backup will implicitly cover once there's real data to restore.
+- Cron installed for the `andrew` user (never root) for daily 3am backups.
+- Cleanup confirmed: the manually-downloaded `.gpg` file removed from the repo root
+  afterward (it's untracked, but was sitting in the working tree), no leftover test
+  containers.
+
+### Noted, not built
+
+- **Backup retention / lifecycle** — not addressed this pass. B2 lifecycle rules for
+  automatic old-backup deletion were mentioned as set up during bucket creation but weren't
+  specified or verified as part of this work; worth confirming what policy is actually
+  active.
+- Everything else from the approved plan was built as scoped — no second B2 key, no
+  broader IAM changes, no changes to the production `db` service itself.
