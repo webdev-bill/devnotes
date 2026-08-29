@@ -62,9 +62,38 @@ docker run -d --rm --name "$CONTAINER_NAME" \
   -e POSTGRES_DB=restore \
   postgres:16 >/dev/null
 
-echo "Waiting for it to accept connections..."
-until docker exec "$CONTAINER_NAME" pg_isready -U restore >/dev/null 2>&1; do
-  sleep 1
+# Not pg_isready: the official postgres image runs an internal *temporary*
+# server during first-run init to execute setup (including the CREATE
+# DATABASE for POSTGRES_DB), which accepts connections before that setup
+# actually finishes, then shuts down and restarts as the real, long-running
+# server. pg_isready succeeds against that temp server too, proving nothing
+# about whether "restore" exists yet or which server generation is even up.
+# Confirmed by watching `docker logs` on a real run here: the temp server
+# reported ready at T+0ms, but CREATE DATABASE didn't run until T+690ms —
+# and there's a second ~590ms gap right after where neither server is
+# listening at all, during the temp-to-final handoff.
+#
+# Retrying CREATE DATABASE directly (instead of polling readiness and then
+# creating once) survives both gaps: "already exists" means some server
+# generation already created it and we're good; a connection failure means
+# either gap, so it just retries until the final server is up.
+echo "Waiting for Postgres to be ready and ensuring the restore database exists..."
+DB_READY_ATTEMPTS=30
+DB_READY_DELAY=1
+for attempt in $(seq 1 "$DB_READY_ATTEMPTS"); do
+  set +e
+  create_db_output=$(docker exec "$CONTAINER_NAME" psql -U restore -d postgres -c "CREATE DATABASE restore;" 2>&1)
+  create_db_status=$?
+  set -e
+  if [ "$create_db_status" -eq 0 ] || echo "$create_db_output" | grep -q "already exists"; then
+    break
+  fi
+  if [ "$attempt" -eq "$DB_READY_ATTEMPTS" ]; then
+    echo "ERROR: ${CONTAINER_NAME} never became ready / restore database could not be created" >&2
+    echo "$create_db_output" >&2
+    exit 1
+  fi
+  sleep "$DB_READY_DELAY"
 done
 
 docker cp "$DUMP_PATH" "${CONTAINER_NAME}:/tmp/restore.dump"
