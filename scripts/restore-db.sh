@@ -3,12 +3,21 @@ set -euo pipefail
 
 # Usage: scripts/restore-db.sh <backup-filename> [container-name]
 #
-# Downloads a given backup object from B2, decrypts it, and pg_restores it
-# into a brand-new one-off Postgres container — never the production "db"
-# service or its db_data volume. This is a structural guarantee, not a
-# convention: the throwaway container shares no compose project, no volume,
-# and no server process with production, so there's no flag or typo that
-# could reach real data.
+# Decrypts a given backup and pg_restores it into a brand-new one-off
+# Postgres container — never the production "db" service or its db_data
+# volume. This is a structural guarantee, not a convention: the throwaway
+# container shares no compose project, no volume, and no server process
+# with production, so there's no flag or typo that could reach real data.
+#
+# If <backup-filename> already exists as a local file in the repo root,
+# it's used as-is and B2 is never contacted. This is the standard,
+# documented restore-verification path: the production B2 application key
+# is write-only by design (it can upload backups but can't read/list/delete
+# them), so retrieving a backup for a real disaster-recovery restore means
+# downloading it manually through an authenticated B2 console session and
+# placing it here — never minting a read-capable key, even temporarily.
+# Falling back to `b2 file download` below only exists for convenience in
+# a dev/test setup where a broader-scoped key happens to be configured.
 if [ "$#" -lt 1 ]; then
   echo "Usage: $0 <backup-filename> [container-name]" >&2
   exit 1
@@ -30,11 +39,16 @@ set +a
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-DOWNLOAD_PATH="${TMP_DIR}/${BACKUP_NAME}"
 DUMP_PATH="${TMP_DIR}/restore.dump"
 
-echo "Downloading ${BACKUP_NAME} from B2 bucket ${B2_BUCKET_NAME}..."
-b2 file download "b2://${B2_BUCKET_NAME}/${BACKUP_NAME}" "$DOWNLOAD_PATH"
+if [ -f "$BACKUP_NAME" ]; then
+  echo "Found ${BACKUP_NAME} locally — using it, B2 not contacted."
+  DOWNLOAD_PATH="$BACKUP_NAME"
+else
+  DOWNLOAD_PATH="${TMP_DIR}/${BACKUP_NAME}"
+  echo "${BACKUP_NAME} not found locally — downloading from B2 bucket ${B2_BUCKET_NAME}..."
+  b2 file download "b2://${B2_BUCKET_NAME}/${BACKUP_NAME}" "$DOWNLOAD_PATH"
+fi
 
 echo "Decrypting..."
 gpg --batch --yes --pinentry-mode loopback --decrypt \
