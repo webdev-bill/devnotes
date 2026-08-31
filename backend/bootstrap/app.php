@@ -26,6 +26,9 @@ return Application::configure(basePath: dirname(__DIR__))
         // back http://. Trusting '*' rather than a pinned network CIDR is
         // safe here specifically because the backend container has no
         // published port (only reachable via Traefik) — same as Postgres.
+        // If a port is ever published here (e.g. for debugging), this must
+        // be scoped to Traefik's actual network/CIDR instead of '*', or
+        // forwarded headers become spoofable from the public internet.
         $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
