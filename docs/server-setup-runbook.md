@@ -1757,3 +1757,70 @@ of recorded ownership.
   active.
 - Everything else from the approved plan was built as scoped — no second B2 key, no
   broader IAM changes, no changes to the production `db` service itself.
+
+## 2026-08-31 — Bug Fix: Paginated API URLs Showing http:// Instead of https://
+
+**Bug report:** paginated endpoints (e.g. `GET /api/notes`) returned `http://` in
+`first_page_url`, `path`, `next_page_url`, etc., despite the site only ever being served
+over HTTPS via Traefik.
+
+**Root cause:** Traefik terminates TLS at the edge and forwards plain HTTP to the
+`backend` container over the internal Docker network (per `docker-compose.prod.yml`).
+Laravel had never been told to trust proxy headers, so it had no way to know the original
+request was HTTPS — it built all generated URLs (including pagination links) from the
+plain-HTTP request it actually received, defaulting to `http://`.
+
+**Version check first:** confirmed via `backend/composer.json` (`laravel/framework
+^13.17`) before touching anything — Laravel 11+ moved proxy trust config into
+`bootstrap/app.php` (`->trustProxies()`), replacing the old
+`app/Http/Middleware/TrustProxies.php` pattern from Laravel 10 and earlier. This project
+already uses the `bootstrap/app.php` pattern elsewhere (the `redirectGuestsTo` fix, see
+2026-08-26 above), and no `TrustProxies.php` file exists in the repo, confirming the
+newer pattern was the right target.
+
+**Option considered and rejected:** pinning the exact Docker network CIDR in
+`docker-compose.prod.yml` and trusting only that range. Rejected because
+`docker-compose.prod.yml` currently defines no custom network at all — `backend`,
+`frontend`, `db`, and `traefik` all share Compose's implicit default network with no
+pinned subnet. Doing this properly would mean *adding* a new custom network block with a
+static subnet (a real topology change to the production stack, touching every service's
+network attachment), not just reading an existing value.
+
+**Option chosen: trust all proxies (`at: '*'`).** Justified specifically because the
+`backend` container has no published port in `docker-compose.prod.yml` — it's only
+reachable through Traefik over the internal Docker network, exactly like Postgres already
+has no published port. Trusting `'*'` is therefore equivalent in practice to trusting only
+Traefik, without the added risk of restructuring the Docker network topology for a
+cosmetic URL-generation fix. This is also Laravel's own documented recommendation for
+apps with no direct public ingress.
+
+**Fix**, in `backend/bootstrap/app.php`, added inside the existing `->withMiddleware()`
+block alongside `redirectGuestsTo`:
+
+```php
+$middleware->trustProxies(at: '*');
+```
+
+Checked Laravel's `TrustProxies` middleware source first: the default `$headers` bitmask
+already covers `X-Forwarded-For`, `-Host`, `-Port`, `-Proto`, `-Prefix`, and `-Aws-Elb`, so
+no explicit `headers:` argument was needed — passing only `at: '*'` was sufficient.
+
+**Verification, in order:**
+- Windows' system PHP (7.3) choked on the named-argument syntax when lint-checking
+  directly — a red herring, not a real syntax error. Confirmed by spinning up the actual
+  dev stack (`docker compose up -d db backend`, Laravel 13.29.0 / PHP 8.4 inside the
+  container) and running `php -l bootstrap/app.php` there instead: clean.
+- Functional test inside the dev container: `curl` against `GET /api/notes` with
+  `X-Forwarded-Proto: https` and `X-Forwarded-Host` set (simulating Traefik) returned
+  `https://` pagination URLs. A negative-control request with neither header still
+  returned `http://localhost/...` — confirming the fix responds to the forwarded header
+  rather than some other change (e.g. `APP_URL`) coincidentally fixing the output.
+- Tore down the dev containers afterward (`docker compose down`) — nothing left running
+  from this verification pass.
+- Committed directly to `main` per `docs/git-workflow.md`
+  (`fix: trust Traefik proxy headers so paginated API URLs use https`), gitleaks
+  pre-commit hook ran clean, pushed. GitHub Actions "Deploy to Production" run completed
+  successfully (41s).
+- **Live verification against production**: `GET https://devnotes.billandrewsallao.com/api/notes`
+  now returns `first_page_url`, `path`, and `last_page_url` all starting with `https://`
+  (previously `http://`).
