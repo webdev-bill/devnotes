@@ -19,6 +19,14 @@ return Application::configure(basePath: dirname(__DIR__))
         // browser navigating to the URL directly), which throws
         // RouteNotFoundException and surfaces as a 500 instead of a 401.
         $middleware->redirectGuestsTo(fn () => null);
+
+        // Traefik terminates TLS and forwards plain HTTP over the internal
+        // Docker network — without this, Laravel never sees the original
+        // request was HTTPS, so generated URLs (e.g. pagination links) come
+        // back http://. Trusting '*' rather than a pinned network CIDR is
+        // safe here specifically because the backend container has no
+        // published port (only reachable via Traefik) — same as Postgres.
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
