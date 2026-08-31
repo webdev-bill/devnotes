@@ -50,6 +50,7 @@ export default function Nav() {
         </NavLink>
         <Tab to="/notes" label="~/notes.md" />
         <Tab to="/blog" label="~/blog.md" />
+        <Tab to="/tools" label="~/tools.md" />
         {isAuthenticated ? (
           <>
             <Tab to="/my/notes" label="~/my-notes.md" />

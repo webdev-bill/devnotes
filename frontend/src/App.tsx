@@ -4,6 +4,7 @@ import ProtectedRoute from './components/ProtectedRoute'
 import BlogDetail from './pages/BlogDetail'
 import BlogList from './pages/BlogList'
 import Home from './pages/Home'
+import ImageToWebpConverter from './pages/ImageToWebpConverter'
 import Login from './pages/Login'
 import BlogDashboard from './pages/my/BlogDashboard'
 import BlogForm from './pages/my/BlogForm'
@@ -11,6 +12,7 @@ import NoteForm from './pages/my/NoteForm'
 import NotesDashboard from './pages/my/NotesDashboard'
 import NoteDetail from './pages/NoteDetail'
 import NotesList from './pages/NotesList'
+import ToolsLanding from './pages/ToolsLanding'
 
 export default function App() {
   return (
@@ -21,6 +23,8 @@ export default function App() {
         <Route path="notes/:id" element={<NoteDetail />} />
         <Route path="blog" element={<BlogList />} />
         <Route path="blog/:slug" element={<BlogDetail />} />
+        <Route path="tools" element={<ToolsLanding />} />
+        <Route path="tools/image-to-webp" element={<ImageToWebpConverter />} />
         <Route path="login" element={<Login />} />
 
         <Route element={<ProtectedRoute />}>
