@@ -1824,3 +1824,139 @@ no explicit `headers:` argument was needed — passing only `at: '*'` was suffic
 - **Live verification against production**: `GET https://devnotes.billandrewsallao.com/api/notes`
   now returns `first_page_url`, `path`, and `last_page_url` all starting with `https://`
   (previously `http://`).
+
+## 2026-08-31 — Tools Module: Client-Side Image-to-WebP Converter
+
+Built a new `/tools` section — a directory-listing landing page (same visual pattern as
+`/notes`/`/blog`, sourced from `frontend/src/tools/registry.ts` so future tools don't
+touch the landing page) plus the first real tool, `/tools/image-to-webp`. Entirely
+frontend-only: drag-and-drop or file-picker in, `createImageBitmap` → off-screen
+`<canvas>` → `canvas.toBlob('image/webp', quality)` → object-URL download, nothing
+touches the API. New files: `tools/registry.ts`, `components/ToolPageLayout.tsx`,
+`pages/ToolsLanding.tsx`, `pages/ImageToWebpConverter.tsx`; added a `~/tools.md` nav tab
+alongside the existing public `~/notes.md`/`~/blog.md` pair.
+
+### No browser tool again this session — used a different real substitute, not a mock
+
+`claude-in-chrome` was declined again (same limitation as every frontend session in this
+project). Unlike prior sessions, "no browser tool" wasn't good enough here — this feature
+*is* browser Canvas/File API code with no server side to curl. Found Chrome already
+installed locally (`C:\Program Files\Google\Chrome\Application\chrome.exe`) and drove it
+directly over CDP with `puppeteer-core` (a throwaway Node project in the scratchpad
+directory, not added to the repo — no browser binary download, just a small client
+library pointed at the existing install). This exercises the *actual* `onChange` handler,
+`createImageBitmap`, canvas draw, and `toBlob('image/webp')` — genuinely running the
+shipped code in a real renderer, not simulating it. Files were injected via CDP's
+`uploadFile` (sets the file input directly, bypassing the OS picker — a legitimate way to
+drive a real `<input type="file">`), and the resulting blob was pulled back out via
+`fetch()` on the object URL from inside the page and returned as base64. Worth carrying
+forward: this pattern is a real fallback for testing browser-only JS in this project when
+neither a live UI click-through nor a curl-able API is available.
+
+### Test images — real EXIF data, without touching personal photos
+
+Needed a real photo with genuine EXIF GPS data per the plan's requirement, but didn't want
+to run this test against the user's actual photo library for a privacy verification.
+Used `ianare/exif-samples` on GitHub instead — a long-standing public test-fixture repo
+that EXIF-parsing libraries themselves use for this exact purpose (real camera EXIF blocks
+with GPS IFDs, MIT-licensed test data) — pulled via `raw.githubusercontent.com`:
+- `jpg/gps/DSCN0010.jpg` (161,713 B, Nikon COOLPIX P6000, confirmed GPS-tagged) — small
+  photo with EXIF GPS.
+- `jpg/Reconyx_HC500_Hyperfire.jpg` (425,890 B, 2048×1536) — larger real photo, has EXIF
+  but no GPS, for a general size-reduction case.
+- A synthetic 1400×900 PNG (`screenshot-sample.png`, generated locally via PowerShell's
+  `System.Drawing` — flat color blocks + repeated text lines, standing in for a real UI
+  screenshot) since no PNG existed anywhere in the repo to test against.
+
+No `exiftool`, ImageMagick, or Python/PIL available on this machine to inspect EXIF
+directly, so verification used two purpose-written checks instead of a proper EXIF
+library: a byte scanner confirming the source JPEGs' APP1 segments actually contain an
+`Exif\0\0` marker (positive control — proves the "before" claim, not just the filename),
+and a RIFF chunk walker over the *output* WebP bytes checking for an `EXIF` FourCC chunk.
+Cross-checked both source and output against `file`'s own format detection as a second,
+independent tool.
+
+### EXIF verification result: confirmed stripped, UI claim added
+
+Both EXIF-bearing JPEGs (`gps-sample.jpg`, `large-photo.jpg`) converted to WebPs
+containing only `VP8X`, `ICCP`, and `VP8 ` chunks — no `EXIF` chunk in either output,
+despite the chunk walker confirming the sources genuinely carried `Exif\0\0` (with GPS,
+for the first). This matches the theoretical expectation (canvas is a raw pixel buffer
+with no metadata channel to re-attach on encode) but this was checked against real EXIF
+bytes rather than assumed. Added the UI note near the drop zone:
+> EXIF metadata, including location data, is automatically removed during conversion.
+
+### Real finding: WebP can come out *larger* than the source — the flag-token case fired for real
+
+`screenshot-sample.png` (108,798 B) converted to a **164,480 B** WebP at the default
+quality 80 — 51% *larger*, not smaller. Confirmed genuine, not a bug: PNG's lossless
+scheme handles this kind of content (large flat color regions, sharp text edges, few
+unique colors) more efficiently than lossy WebP at quality 80, which spends bits on
+DCT-block artifacting that a flat UI screenshot doesn't need. This is exactly the "rare
+case output is larger" the approved plan anticipated with the flag/red delta styling —
+good to have it actually fire against a real file rather than only existing as a
+defensive `if` branch nobody had triggered. No code change from this — it's a real,
+correctly-handled outcome, not a defect. Real photos (both JPEG samples) converted
+smaller as expected: 25.9% and 36.2% reduction at quality 80.
+
+### Quality slider / debounce verified for real
+
+Loaded `large-photo.jpg` (271,538 B output at default quality 80), then set the slider to
+20 programmatically and waited past the 250ms debounce window: re-encoded down to
+87,468 B, confirming both that the slider actually re-triggers encoding and that quality
+genuinely affects output size in the expected direction.
+
+### Error paths verified for real, not just read through
+
+- Non-image file (`.txt` renamed, `text/plain`): correctly hit the MIME-type check,
+  rendered `ErrorState` with `"not-an-image.txt" doesn't look like an image (text/plain).`
+- Corrupted JPEG (first 5,000 bytes of a valid file, truncated mid-scan): `file(1)` still
+  read the (intact) header fine, but `createImageBitmap` genuinely threw in the browser —
+  hit the `catch` branch, rendered `Couldn't decode "corrupted.jpg" — it may be corrupted
+  or unsupported.` Confirms the two error paths are actually distinct code paths that both
+  fire correctly, not just one tested twice.
+
+### Gotcha: oxlint's `set-state-in-effect` rule caught two real smells
+
+First draft called `setStatus('loading')` synchronously at the top of the debounce
+`useEffect`, and stored the object URL via `setResultUrl(url)` inside its own effect.
+oxlint flagged both under `react(set-state-in-effect)` — a newer lint rule this project
+hadn't hit before. Fixed rather than suppressed: moved `setStatus('loading')` to the
+actual triggering events (successful image load, quality slider `onChange`) instead of
+deriving it inside an effect, and switched the object URL from state+effect to
+`useMemo(() => URL.createObjectURL(resultBlob), [resultBlob])` with the effect doing
+*only* the `URL.revokeObjectURL` cleanup — no setState left in either effect body. Zero
+new lint warnings after the fix (same two pre-existing, already-accepted context-file
+warnings as every prior session).
+
+### Gotcha: `docker compose up --build` failed on a cached image
+
+`docker compose up -d --build frontend` failed pulling `php:8.4-cli`'s image metadata
+(`failed to authorize: failed to fetch anonymous token` — a transient Docker Hub/registry
+connectivity issue) even though `devnotes-backend`'s image was already built and cached
+locally from days earlier. Buildx checks base-image metadata over the network on every
+`--build` invocation regardless of cache hits. Since nothing in `package.json` changed
+(no new dependencies), `docker compose up -d frontend` (no `--build`) reused the cached
+image directly — source is bind-mounted per `docker-compose.yml`, so the new `.tsx` files
+were picked up without any rebuild.
+
+### Verification summary
+
+- `tsc -b && vite build`: clean. `oxlint`: 0 errors, 2 warnings (both pre-existing,
+  accepted in earlier sessions).
+- Route regression check (`/`, `/notes`, `/notes/1`, `/blog`, `/login`, `/my/notes`,
+  `/my/blog`, `/tools`, `/tools/image-to-webp`): all `200`.
+- Real conversions run through an actual Chrome renderer (not simulated): 3 different
+  images/formats/sizes, quality-slider re-encode, 2 distinct error paths, EXIF-stripping
+  confirmed against real EXIF+GPS bytes, output files confirmed as valid WebP by `file(1)`.
+- Committed directly to `main` per `docs/git-workflow.md`
+  (`feat: add Tools module with client-side image-to-WebP converter`), gitleaks
+  pre-commit hook ran clean, pushed. GitHub Actions run #16 (`b806807`) completed
+  successfully.
+- **Live verification against production**, via the same real-Chrome-over-CDP method
+  (no browser extension available): loaded `https://devnotes.billandrewsallao.com/tools`
+  and `/tools/image-to-webp` and confirmed the actual rendered content (nav tab, tool
+  listing, converter UI, EXIF note) — not just the unrendered SPA shell a plain
+  fetch/curl would return. Ran one real conversion against production itself
+  (`gps-sample.jpg` → 25.9% smaller, valid WebP per `file(1)`), matching the dev-container
+  result exactly.
