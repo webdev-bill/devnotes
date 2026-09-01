@@ -7,6 +7,7 @@ use App\Models\Image;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -117,6 +118,24 @@ class ImageUploadTest extends TestCase
             'image' => ["The image's content does not match an allowed image type (jpeg, png, webp)."],
         ]);
         $this->assertSame(0, Image::count());
+    }
+
+    public function test_finfo_rejection_is_logged_since_validation_exceptions_are_not_reported_by_default(): void
+    {
+        Storage::fake('images');
+        Log::spy();
+        $user = User::factory()->create();
+        $note = $user->notes()->create(['title' => 't', 'content' => 'c', 'visibility' => NoteVisibility::Private]);
+
+        $php = $this->uploadedFileFromBytes('<'.'?php echo "pwned"; ?>', 'shell.jpg', 'image/jpeg');
+
+        $this->actingAs($user, 'sanctum')->post("/api/my/notes/{$note->id}/images", ['image' => $php]);
+
+        Log::shouldHaveReceived('warning')
+            ->once()
+            ->with('Image upload rejected: finfo content sniff', \Mockery::on(
+                fn ($context) => $context['original_name'] === 'shell.jpg' && $context['sniffed_mime'] !== 'image/jpeg'
+            ));
     }
 
     public function test_truncated_jpeg_passes_finfo_but_is_rejected_by_getimagesize(): void

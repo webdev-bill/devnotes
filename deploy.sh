@@ -9,14 +9,14 @@ NEW_SHA=$(git rev-parse HEAD)
 
 echo "Deploying $OLD_SHA -> $NEW_SHA"
 
-docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+./scripts/prod-compose.sh up -d --build
 
 # Path corrected to where migrations actually live in this repo
 # (backend/database/migrations) — the original database/migrations would
 # never match anything here, silently skipping the migrate step every time.
 if git diff --name-only "$OLD_SHA" "$NEW_SHA" -- backend/database/migrations | grep -q .; then
   echo "Migration files changed — running migrate --force"
-  docker compose -f docker-compose.prod.yml exec -T backend php artisan migrate --force
+  ./scripts/prod-compose.sh exec -T backend php artisan migrate --force
 else
   echo "No migration file changes — skipping migrate"
 fi

@@ -60,6 +60,24 @@ services:
       B2_IMAGES_BUCKET_ID: ${B2_IMAGES_BUCKET_ID}
       B2_IMAGES_REGION: ${B2_IMAGES_REGION}
       B2_IMAGES_ENDPOINT: ${B2_IMAGES_ENDPOINT}
+      # This service's environment: block is an explicit per-var allowlist,
+      # not a passthrough of everything in .env.production — a var missing
+      # here is simply never seen by the container, regardless of what's set
+      # in the env file. LOG_* previously wasn't listed at all, so config/
+      # logging.php's env() calls always fell back to their own defaults
+      # (which happen to still produce working debug-level logging) no
+      # matter what .env.production said. Given sane defaults via Compose's
+      # ${VAR:-default} syntax, so .env.production doesn't need to define
+      # these unless you actually want to override one.
+      LOG_CHANNEL: ${LOG_CHANNEL:-stack}
+      LOG_STACK: ${LOG_STACK:-single}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      LOG_DEPRECATIONS_CHANNEL: ${LOG_DEPRECATIONS_CHANNEL:-null}
+    volumes:
+      # Named volume, not the image's writable layer — without this, every
+      # `up -d --build`/`--force-recreate` (i.e. every deploy) silently wipes
+      # storage/logs/laravel.log along with the rest of the old container.
+      - backend_logs:/var/www/html/storage/logs
     depends_on:
       db:
         condition: service_healthy
@@ -122,3 +140,4 @@ services:
 volumes:
   db_data:
   traefik_certs:
+  backend_logs:

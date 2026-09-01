@@ -5,11 +5,17 @@ namespace App\Rules;
 use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
 
 // Defense in depth: never trust the client's Content-Type header or the
 // file's extension. Two independent checks against the real bytes, kept
 // separate (not merged into one condition) so a failure is traceable to
-// exactly which one caught it.
+// exactly which one caught it. A rejection here is a plain ValidationException
+// (422), which Laravel's default exception handler deliberately does NOT
+// report/log (it's "expected" client input, not an application error) — so
+// without the explicit Log::warning() calls below, a rejected upload leaves
+// no trace in storage/logs/laravel.log at all. Logged here, not in the
+// controller, so the log line always carries which specific check failed.
 class GenuineImageContent implements ValidationRule
 {
     private const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -23,25 +29,38 @@ class GenuineImageContent implements ValidationRule
         }
 
         $realPath = $value->getRealPath();
+        $originalName = $value->getClientOriginalName();
+        $claimedMime = $value->getClientMimeType();
 
-        if (! $this->passesFinfoSniff($realPath)) {
+        $sniffedMime = $this->sniffedMimeType($realPath);
+        if (! in_array($sniffedMime, self::ALLOWED_MIME_TYPES, true)) {
+            Log::warning('Image upload rejected: finfo content sniff', [
+                'original_name' => $originalName,
+                'claimed_mime' => $claimedMime,
+                'sniffed_mime' => $sniffedMime,
+            ]);
             $fail("The :attribute's content does not match an allowed image type (jpeg, png, webp).");
 
             return;
         }
 
         if (! $this->passesGetimagesizeCheck($realPath)) {
+            Log::warning('Image upload rejected: getimagesize could not decode it', [
+                'original_name' => $originalName,
+                'claimed_mime' => $claimedMime,
+                'sniffed_mime' => $sniffedMime,
+            ]);
             $fail('The :attribute could not be verified as a valid, decodable image.');
         }
     }
 
-    private function passesFinfoSniff(string $realPath): bool
+    private function sniffedMimeType(string $realPath): string|false
     {
         $finfo = finfo_open(FILEINFO_MIME_TYPE);
         $sniffedMime = finfo_file($finfo, $realPath);
         finfo_close($finfo);
 
-        return in_array($sniffedMime, self::ALLOWED_MIME_TYPES, true);
+        return $sniffedMime;
     }
 
     private function passesGetimagesizeCheck(string $realPath): bool

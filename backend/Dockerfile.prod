@@ -34,6 +34,10 @@ COPY --from=vendor /app ./
 
 COPY docker/nginx.conf /etc/nginx/sites-enabled/default
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+# Any *.ini dropped in conf.d is auto-loaded by the official php image — this
+# raises upload_max_filesize above its 2M stock default (see docker/uploads.ini
+# for why) and pins post_max_size explicitly rather than leaving it implicit.
+COPY docker/uploads.ini /usr/local/etc/php/conf.d/uploads.ini
 
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 
