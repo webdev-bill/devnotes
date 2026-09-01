@@ -15,6 +15,7 @@ class BlogPostController extends Controller
     {
         return BlogPost::query()
             ->published()
+            ->with('coverImage')
             ->latest('published_at')
             ->paginate();
     }
@@ -29,6 +30,6 @@ class BlogPostController extends Controller
             404
         );
 
-        return $blog_post;
+        return $blog_post->load('coverImage');
     }
 }

@@ -1960,3 +1960,256 @@ were picked up without any rebuild.
   fetch/curl would return. Ran one real conversion against production itself
   (`gps-sample.jpg` → 25.9% smaller, valid WebP per `file(1)`), matching the dev-container
   result exactly.
+
+## 2026-09-01 — Image Upload Support: B2-Backed Cover Images and Inline Note Images
+
+Added a single cover image on blog posts and optional inline images (embedded via
+markdown `![alt](url)`) on notes. Full route/schema/Intervention-config proposal was
+reviewed and approved before any code was written, per the established
+propose-then-build workflow. Storage is Backblaze B2, via Laravel's `s3` flysystem
+driver pointed at B2's S3-compatible endpoint — a **separate bucket
+(`devnotes-images-webdevbill`) and separate application key** from the Postgres-backup
+bucket (see the 2026-08-30 entry above).
+
+### Data model
+
+- New `images` table: `id`, polymorphic `imageable_type`/`imageable_id`, `path` (the B2
+  object key), `mime_type`, `size`, timestamps. Deliberately **no `disk` or `user_id`
+  column** — `disk` is YAGNI with only one storage backend today (trivial, low-risk
+  migration to add later if that changes), and `user_id` would duplicate ownership
+  that's already derivable via `imageable->user_id`, which is exactly the kind of
+  second signal that can drift out of sync the project has already avoided elsewhere
+  (see `published_at`-only vs. a second `status` column, 2026-08-26 schema session).
+  Ownership resolves as `$image->imageable->user_id` everywhere, no exceptions.
+- `blog_posts.cover_image_path` (nullable string) holds the B2 object key directly.
+  It's **not** in `BlogPost`'s `#[Fillable]`, so it can never be set through the
+  regular JSON update endpoint — only `BlogPostCoverImageController` writes it, via
+  `forceFill()`, same boundary as `user_id`.
+- `Image` is `#[Fillable(['path', 'mime_type', 'size'])]` with `imageable_type`/
+  `imageable_id` excluded — created only via `$note->images()->create(...)` or
+  `$blogPost->coverImage()->create(...)`, never mass-assigned from a request, mirroring
+  the existing `user_id` pattern on `Note`/`BlogPost`.
+- `path` is `#[Hidden]` on the `Image` model — the frontend only ever needs an image's
+  `id` to build `/api/images/{id}`; the raw B2 key never reaches the client.
+
+### Upload endpoints and the "save first, then attach" constraint
+
+Both `POST /api/my/notes/{note}/images` and `POST /api/my/blog-posts/{blog_post}/
+cover-image` are separate endpoints from the existing JSON create/update routes, not
+bundled into them. Reasoning: `api/client.ts`'s `apiRequest` only sent JSON bodies
+before this session (see below), and note inline images fundamentally need an
+upload-first flow anyway — the markdown `![alt](url)` needs the returned image URL
+before it can be inserted. Real consequence: a **new** note/post must be saved once
+before an image can attach to it (the polymorphic FK needs a real row), so `NoteForm`
+and `BlogForm` hide the image control behind a "save this note/post once first" hint
+until `initialNote`/`initialPost` is populated (i.e. the edit route, not the create
+route). Same pattern WordPress/Ghost use for featured images.
+
+### Validation — two independent checks against the real bytes, not the client's claims
+
+`GenuineImageContent` (a custom `ValidationRule`) runs `finfo_file()` and
+`getimagesize()` as two **separate** checks, each with its own failure message, so a
+rejection is traceable to exactly which one caught it:
+
+- A file's real content not matching `image/jpeg`/`image/png`/`image/webp` (per
+  `finfo`, ignoring the client's `Content-Type` and the extension) fails the first
+  check.
+- A file that passes the magic-byte sniff but doesn't decode as a real image (e.g. a
+  JPEG truncated after its header) fails the second.
+
+Verified both paths for real in `tests/Feature/ImageUploadTest.php`: a PHP script
+renamed to `.jpg` with a spoofed `image/jpeg` part-header is caught by the `finfo`
+check; a real JPEG truncated to 30 bytes (keeps the magic-byte header, so `finfo`
+still reports `image/jpeg`) is caught by `getimagesize()` instead — two genuinely
+distinct rejections, not the same check exercised twice.
+
+Every accepted upload is then decoded (Intervention Image v3, GD driver — see
+Dockerfile note below), scaled down to a 1600px max dimension (never upscaled), and
+re-encoded as WebP at quality 80 (matching the quality the client-side WebP tool
+already defaults to — see 2026-08-31 entry) with EXIF stripped explicitly. Stored
+under a `Str::random(40)` filename, never the original. This re-encode step is a
+security control, not just optimization: the bytes written to B2 are always
+server-produced from decoded pixel data, never the client's original file content.
+
+### Serving route: two-tier authorization, not a single Policy check
+
+`GET /api/images/{image}` carries no `auth:sanctum` middleware — it can't, since a
+published post's cover image has to load for a signed-out visitor. Auth is resolved
+manually inside `ImageController`: if the image's owner (a public note, a published
+post) is publicly visible, it serves unconditionally; otherwise an anonymous request
+404s (mirroring the public `NoteController`'s existing "hide, don't reveal existence"
+behavior for a private note by id) and an authenticated-but-wrong-user request 403s via
+the existing `NotePolicy`/`BlogPostPolicy` `view` check. This two-tier logic — public
+scope check first, ownership Policy second — mirrors how public vs. private
+note/post content already works elsewhere in the app; a single `Gate::authorize('view',
+...)` call alone would only have covered the owner case, not the "is this public"
+case the public read endpoints handle via query scopes instead of a Policy.
+
+### Frontend: FormData support, and a real gap in the localStorage-token model
+
+`api/client.ts`'s `apiRequest` previously always JSON-stringified its body and set
+`Content-Type: application/json` unconditionally. Now branches on `body instanceof
+FormData` — a FormData body is sent as-is (browser sets its own multipart boundary),
+never stringified, never given a manual `Content-Type` (setting one manually strips the
+boundary and breaks the upload).
+
+**Real gap found, not just anticipated:** since auth is a bearer token in
+`localStorage` rather than a cookie, a plain `<img src="/api/images/123">` can never
+attach `Authorization` — a private note's own owner would never see their own inline
+images render. Fixed with `MarkdownImage.tsx`, a custom `img` renderer passed to
+`react-markdown`'s `components` prop (used in both `NoteDetail.tsx` and
+`BlogDetail.tsx`): for a same-origin `/images/:id` src, it fetches the bytes via the
+existing authenticated-fetch pattern and swaps in a `blob:` object URL; for any other
+(hand-typed external) src it renders a plain `<img>` untouched, so the token is never
+sent to a third-party origin. The object URL is revoked both on unmount and whenever
+`src` changes — the effect's cleanup closes over the URL it personally created, so a
+`src` change (new effect run) revokes the previous one before the next fetch starts,
+and an unmount revokes whatever was last created. No compromise to the localStorage/
+XSS boundary in `CLAUDE.md`: the token never touches a URL or query string.
+
+Blog post cover images skip this entirely — `BlogDetail.tsx` only ever renders a
+`published()`-scoped post fetched through the public endpoint, so its cover image is
+provably public too; a plain `<img>` against the API URL works with no token needed.
+
+**Gotcha (oxlint, recurrence):** first draft of `MarkdownImage` called `setObjectUrl`/
+`setFailed` synchronously at the top of the effect body to reset state on `src`
+change — `react(set-state-in-effect)` flagged it, same rule class hit in the
+2026-08-31 Tools-module session. Fixed the same way: no synchronous setState in the
+effect body at all. Instead of imperatively resetting state, the component tags loaded
+state with the `src` it resolved for and derives "is this stale" during render
+(`loaded?.src === src ? loaded : null`) — state is only ever set from inside the async
+`.then()`/`.catch()` callbacks. Zero new warnings after the fix.
+
+### Real gap found via testing: deleted notes/posts were orphaning their images
+
+Polymorphic relations have no DB-level FK, so nothing was cascading `images` rows (or
+their B2 objects) on delete — caught this by literally leaving one behind during
+tinker testing and noticing `Image::count()` didn't return to zero after deleting its
+post. Fixed with a `static::deleting()` hook in both `Note::booted()` and
+`BlogPost::booted()` that deletes each associated image's B2 object and row before the
+parent is removed. Covered by two new feature tests (`test_deleting_a_note_deletes_its_
+images_from_storage_and_the_database`, and the blog post equivalent).
+
+### Cover-image replace performs real B2 deletes — a deliberate departure from the backup key's write-only posture
+
+`BlogPostCoverImageController@store` deletes the superseded B2 object once the new one
+is safely stored (new file written and `blog_posts.cover_image_path` updated first, old
+object deleted only after — so a failed upload never leaves a post without a cover).
+This is a **real delete capability**, unlike the Postgres-backup B2 application key from
+the 2026-08-30 entry above, which is deliberately scoped write-only specifically so a
+compromised key (or a bug in the app) could never erase backup history — that entry's
+"no delete, rely on B2 lifecycle rules, orphans accepted as the retention story" stance
+still stands for backups and is **not** being walked back here.
+
+The images key is a different credential against a different bucket, provisioned
+deliberately with read+delete because this feature structurally needs both: the
+`GET /api/images/{image}` proxy route has to read bytes back out to serve them, and
+cover-image replace has to delete the old object or B2 usage grows unbounded with every
+edit to a post's cover (unlike backups, where accumulating history is the entire
+point). Scoping this key to the one images bucket only — never the account master key —
+keeps the same narrow-blast-radius principle the backup key already established, just
+with a different, deliberately wider permission set matched to what this specific
+feature actually does.
+
+### Dockerfile: GD extension added (both dev and prod images)
+
+Neither `Dockerfile` nor `Dockerfile.prod` had any image-processing extension before
+this session. Added `libjpeg-dev`/`libpng-dev`/`libwebp-dev` + `docker-php-ext-configure
+gd --with-jpeg --with-webp` + `docker-php-ext-install gd` to both. Verified inside the
+rebuilt dev container: `php -m | grep gd` present, `gd_info()['WebP Support']` is
+`true`. `intervention/image` v3 bundles its GD driver in the core package — no separate
+`intervention/image-driver-gd` package exists on Packagist (the approved plan named
+one; corrected during implementation to just `intervention/image`).
+
+### Gotcha: `BlogPost` route-model-binds by slug everywhere — bit the new tests too
+
+Wrote the first cover-image test hitting `/api/my/blog-posts/{$post->id}/cover-image`
+and got a confusing 404 (`No query results for model [App\Models\BlogPost] 1`) even
+though the post genuinely existed. Root cause: `BlogPost::getRouteKeyName()` returns
+`'slug'`, so **every** `{blog_post}` route parameter in the app binds by slug, not id —
+already established and documented in the 2026-08-27 blog pages session, just not front
+of mind while writing a fresh test. Fixed by using `$post->slug` in the URL. No code
+bug — a test-authoring mistake against an already-correct, already-documented
+convention.
+
+### Gotcha: fresh directories created by `docker compose exec` weren't writable from the host
+
+`docker compose exec backend mkdir -p app/Rules app/Services` created directories that
+the Write tool couldn't write into afterward (`EPERM`) from the Windows/WSL UNC path,
+even though `ls -la` reported normal `Andrew`-owned `755` permissions — a drvfs/WSL
+permission-metadata quirk, not a real ownership problem (existing, git-checked-out
+directories were unaffected; only directories freshly created by the container hit
+this). Worked around it by creating new files via `docker compose exec backend sh -c
+"cat > path" <<'EOF'` instead of the Write tool for anything landing in a
+container-created directory; the Write tool worked normally for edits to
+already-existing files and for new files in already-existing directories.
+
+### `.dockerignore` gap: `storage/framework/testing/*` wasn't excluded
+
+The new feature tests were the first thing in this project to use `Storage::fake()`,
+which creates `storage/framework/testing/disks/...` on demand. That directory hit the
+same host-permission quirk above, which then blocked the *build context* transfer on
+the next `docker compose build` (`error from sender: ... Access is denied`) — a step
+that never involves the Write tool at all. Added `storage/framework/testing/*` to
+`backend/.dockerignore` alongside the sibling `cache`/`sessions`/`views`/`logs`
+patterns already there. (Already covered by Laravel's own nested `storage/framework/
+testing/.gitignore`, so nothing here was ever a `git status` risk — only the Docker
+build context was affected.)
+
+### Verification
+
+- **12 backend feature tests**, all passing, using `Storage::fake('images')` (Laravel's
+  real local flysystem adapter under a fake root — genuinely writes/reads files, not a
+  mock) since no B2 credentials exist locally by design (`.env.production`-only, per
+  the standing credential boundary): valid JPEG/PNG upload re-encoded and confirmably
+  stored as real WebP bytes (`getimagesize()` on the stored bytes reports
+  `image/webp`, and the bytes differ from the original JPEG, proving re-encoding
+  actually happened, not a pass-through); the PHP-script-as-.jpg and truncated-JPEG
+  rejections above, each asserted against its own distinct message; oversized-file
+  rejection; cross-user upload 403; private note image 404 unauthenticated / 403 wrong
+  user / 200 owner; published post cover image 200 unauthenticated; draft post cover
+  image 404 unauthenticated; cover-image replace deletes the old B2 object and old row;
+  deleting a note/post deletes its image(s).
+- `./vendor/bin/pint` clean (one file auto-fixed: `concat_space`, `no_unused_imports`
+  in the new test file).
+- `tsc -b && vite build`: clean. `oxlint`: 0 errors, the same 2 pre-existing accepted
+  `AuthContext`/`ThemeContext` warnings, nothing new.
+- Live curl against the running dev container (not just the PHPUnit test kernel):
+  unauthenticated `GET /api/images/999999` → `404`; unauthenticated `POST
+  /api/my/notes/1/images` → `401` — confirms real routing/middleware wiring outside the
+  test framework, not just inside it.
+- **Real browser verification** via the same real-Chrome-over-CDP + `puppeteer-core`
+  method as the 2026-08-31 Tools-module session (browser extension still not
+  installed): logged in, created a note, confirmed the "insert image" control is
+  hidden with a "save first" hint pre-save and appears post-save, selected a real file
+  through the actual file input, confirmed a real multipart `POST` fired to
+  `/api/my/notes/{id}/images`. Same flow for a blog post's cover-image control. Both
+  correctly received `500`s locally (no B2 credentials in dev `.env` — the AWS SDK's
+  own error, `Missing required client configuration options: region`, is the exact,
+  expected gap given only `.env.production` will ever hold real B2 credentials) — and
+  confirmed the frontend degrades correctly on that failure: the real error message
+  renders, the upload button re-enables, nothing gets stuck or crashes. This validates
+  the entire pipeline for real, through an actual renderer, up to the one boundary that
+  structurally requires credentials this session was never meant to hold.
+- **Not verified**: an actual successful upload landing in the real B2 bucket, since
+  that requires the real `.env.production` credentials, which only exist on the
+  server. That's the one piece left for the deploy step below.
+
+### What's needed on the server (for you to run — not done by this session)
+
+Add to `.env.production` (placeholders already in `.env.production.example`):
+
+```
+B2_IMAGES_KEY_ID=<from the B2 console, for the devnotes-images-webdevbill bucket>
+B2_IMAGES_APPLICATION_KEY=<same>
+B2_IMAGES_BUCKET=devnotes-images-webdevbill
+B2_IMAGES_BUCKET_ID=<from the B2 console — not consumed by the app, kept for reference>
+B2_IMAGES_REGION=<e.g. us-west-004 — must match the bucket's actual region>
+B2_IMAGES_ENDPOINT=<e.g. https://s3.us-west-004.backblazeb2.com — same region>
+```
+
+No other manual step is required: `deploy.sh` already runs `docker compose ... up -d
+--build` unconditionally (picks up the new GD extension and Composer packages) and
+diffs `backend/database/migrations` to decide whether to run `artisan migrate --force`
+(the two new migrations in this session will be detected and applied automatically on
+the next push to `main`).

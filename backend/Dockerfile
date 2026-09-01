@@ -5,12 +5,18 @@ FROM php:8.4-cli
 
 # libpq-dev is needed to compile the pdo_pgsql extension against PostgreSQL's
 # client library; git/unzip/zip are needed by Composer to fetch packages.
+# libjpeg-dev/libpng-dev/libwebp-dev + the gd configure flags are needed for
+# Intervention Image to decode/re-encode uploaded images (JPEG/PNG in, WebP out).
 RUN apt-get update && apt-get install -y \
     libpq-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libwebp-dev \
     git \
     unzip \
     zip \
-    && docker-php-ext-install pdo pdo_pgsql \
+    && docker-php-ext-configure gd --with-jpeg --with-webp \
+    && docker-php-ext-install pdo pdo_pgsql gd \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the official Composer binary instead of installing it via apt/curl.

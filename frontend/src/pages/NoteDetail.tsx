@@ -3,6 +3,7 @@ import { useParams } from 'react-router'
 import { getPublicNote } from '../api/notes'
 import ErrorState from '../components/ErrorState'
 import LoadingState from '../components/LoadingState'
+import MarkdownImage from '../components/MarkdownImage'
 import TagPills from '../components/TagPills'
 import { useFetch } from '../hooks/useFetch'
 
@@ -36,7 +37,7 @@ export default function NoteDetail() {
           assumption that this renderer never executes injected HTML.
           See CLAUDE.md.
         */}
-        <ReactMarkdown>{note.content}</ReactMarkdown>
+        <ReactMarkdown components={{ img: MarkdownImage }}>{note.content}</ReactMarkdown>
       </div>
     </div>
   )

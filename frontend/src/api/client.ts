@@ -1,6 +1,6 @@
 import { getToken } from './token'
 
-const API_URL = import.meta.env.VITE_API_URL
+export const API_URL = import.meta.env.VITE_API_URL
 
 export class ApiError extends Error {
   status: number
@@ -13,6 +13,7 @@ export class ApiError extends Error {
 
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  /** A FormData body (e.g. a file upload) is sent as-is, multipart — never JSON-stringified. */
   body?: unknown
   /** Attach the stored Sanctum token as an Authorization header. */
   auth?: boolean
@@ -32,7 +33,12 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     Accept: 'application/json',
   }
 
-  if (body !== undefined) {
+  const isFormData = body instanceof FormData
+
+  // FormData: the browser sets Content-Type itself (with the multipart
+  // boundary) — setting it manually here would drop the boundary and break
+  // the upload.
+  if (body !== undefined && !isFormData) {
     headers['Content-Type'] = 'application/json'
   }
 
@@ -52,7 +58,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const response = await fetch(`${API_URL}${path}${queryString ? `?${queryString}` : ''}`, {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body),
   })
 
   if (!response.ok) {

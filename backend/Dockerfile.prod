@@ -15,11 +15,17 @@ RUN composer dump-autoload --optimize --no-dev
 # ---- Stage 2: runtime ----
 FROM php:8.4-fpm AS runtime
 
+# libjpeg-dev/libpng-dev/libwebp-dev + the gd configure flags are needed for
+# Intervention Image to decode/re-encode uploaded images (JPEG/PNG in, WebP out).
 RUN apt-get update && apt-get install -y \
     libpq-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libwebp-dev \
     nginx \
     supervisor \
-    && docker-php-ext-install pdo pdo_pgsql \
+    && docker-php-ext-configure gd --with-jpeg --with-webp \
+    && docker-php-ext-install pdo pdo_pgsql gd \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /var/www/html

@@ -32,6 +32,12 @@ export type Paginated<T> = {
   total: number
 }
 
+export type Image = {
+  id: number
+  mime_type: string
+  size: number
+}
+
 export type BlogPost = {
   id: number
   title: string
@@ -40,6 +46,7 @@ export type BlogPost = {
   published_at: string | null
   created_at: string
   updated_at: string
+  cover_image: Image | null
 }
 
 export type BlogPostPayload = {

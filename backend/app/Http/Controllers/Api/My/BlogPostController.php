@@ -20,6 +20,7 @@ class BlogPostController extends Controller
     public function index(Request $request): LengthAwarePaginator
     {
         return $request->user()->blogPosts()
+            ->with('coverImage')
             ->latest()
             ->paginate();
     }
@@ -29,10 +30,12 @@ class BlogPostController extends Controller
      */
     public function store(StoreBlogPostRequest $request): BlogPost
     {
-        return $request->user()->blogPosts()->create([
+        $blog_post = $request->user()->blogPosts()->create([
             ...$request->safe()->except('slug'),
             'slug' => $request->safe()->input('slug') ?: Str::slug($request->safe()->input('title')),
         ]);
+
+        return $blog_post->load('coverImage');
     }
 
     /**
@@ -42,7 +45,7 @@ class BlogPostController extends Controller
     {
         Gate::authorize('view', $blog_post);
 
-        return $blog_post;
+        return $blog_post->load('coverImage');
     }
 
     /**
@@ -52,7 +55,7 @@ class BlogPostController extends Controller
     {
         $blog_post->update($request->safe()->all());
 
-        return $blog_post;
+        return $blog_post->load('coverImage');
     }
 
     /**

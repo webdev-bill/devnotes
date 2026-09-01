@@ -1,4 +1,4 @@
-import { useRef, type TextareaHTMLAttributes } from 'react'
+import { forwardRef, useRef, type TextareaHTMLAttributes } from 'react'
 
 type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'className'> & {
   value: string
@@ -8,8 +8,14 @@ type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'className'> & {
  * A textarea with a live line-number gutter, like an editor pane. The
  * gutter is a plain div kept in sync on scroll — not a real editor
  * widget, just enough to feel like one for markdown note content.
+ *
+ * Forwards its ref to the underlying <textarea> — needed by callers that
+ * insert text at the cursor position (e.g. NoteForm's image upload).
  */
-export default function LineNumberedTextarea({ value, onScroll, ...props }: Props) {
+const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, Props>(function LineNumberedTextarea(
+  { value, onScroll, ...props },
+  ref,
+) {
   const gutterRef = useRef<HTMLDivElement>(null)
   const lineCount = value === '' ? 1 : value.split('\n').length
 
@@ -33,6 +39,7 @@ export default function LineNumberedTextarea({ value, onScroll, ...props }: Prop
         ))}
       </div>
       <textarea
+        ref={ref}
         value={value}
         onScroll={handleScroll}
         style={{ lineHeight: '1.6' }}
@@ -41,4 +48,6 @@ export default function LineNumberedTextarea({ value, onScroll, ...props }: Prop
       />
     </div>
   )
-}
+})
+
+export default LineNumberedTextarea

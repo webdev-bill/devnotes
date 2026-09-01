@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { imagePath, uploadNoteImage } from '../api/images'
 import type { Note, NotePayload, NoteVisibility } from '../api/types'
 import { inputClass, labelClass } from './formStyles'
 import LineNumberedTextarea from './LineNumberedTextarea'
@@ -17,6 +18,42 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
   const [tagsInput, setTagsInput] = useState(initialNote?.tags.map((tag) => tag.name).join(', ') ?? '')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [imageUploading, setImageUploading] = useState(false)
+  const [imageError, setImageError] = useState<string | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  async function handleImageSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = '' // allow re-selecting the same file later
+    if (!file || !initialNote) return
+
+    setImageError(null)
+    setImageUploading(true)
+    try {
+      const image = await uploadNoteImage(initialNote.id, file)
+      const markdown = `![${file.name}](${imagePath(image.id)})`
+      const textarea = textareaRef.current
+
+      if (textarea) {
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+        const next = content.slice(0, start) + markdown + content.slice(end)
+        setContent(next)
+        // Restore focus and place the cursor right after the inserted text.
+        requestAnimationFrame(() => {
+          textarea.focus()
+          textarea.selectionStart = textarea.selectionEnd = start + markdown.length
+        })
+      } else {
+        setContent((current) => current + markdown)
+      }
+    } catch (err) {
+      setImageError(err instanceof Error ? err.message : 'Image upload failed. Please try again.')
+    } finally {
+      setImageUploading(false)
+    }
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
@@ -64,6 +101,7 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
         </label>
         <div className="mt-1">
           <LineNumberedTextarea
+            ref={textareaRef}
             id="content"
             required
             rows={14}
@@ -71,6 +109,30 @@ export default function NoteForm({ initialNote, onSubmit, submitLabel }: NoteFor
             onChange={(event) => setContent(event.target.value)}
           />
         </div>
+        {initialNote ? (
+          <div className="mt-2">
+            <button
+              type="button"
+              disabled={imageUploading}
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-md border border-rule px-3 py-1.5 font-display text-xs font-medium text-ink hover:bg-paper disabled:opacity-50"
+            >
+              {imageUploading ? 'uploading…' : '+ insert image'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              onChange={handleImageSelected}
+              className="hidden"
+            />
+            {imageError && <p className="mt-1 font-body text-xs text-flag">{imageError}</p>}
+          </div>
+        ) : (
+          <p className="mt-2 font-body text-xs text-ink/40">
+            Save this note once before inserting images.
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

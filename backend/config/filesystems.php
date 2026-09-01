@@ -60,6 +60,24 @@ return [
             'report' => false,
         ],
 
+        // Backblaze B2 bucket for note/blog-post images, via B2's S3-compatible
+        // API. Separate bucket and separate key from the Postgres-backup bucket
+        // (see docs/server-setup-runbook.md) — this key needs read+delete (cover
+        // image replace deletes the old object), unlike the backup key, which is
+        // deliberately write-only.
+        'images' => [
+            'driver' => 's3',
+            'key' => env('B2_IMAGES_KEY_ID'),
+            'secret' => env('B2_IMAGES_APPLICATION_KEY'),
+            'region' => env('B2_IMAGES_REGION'),
+            'bucket' => env('B2_IMAGES_BUCKET'),
+            'endpoint' => env('B2_IMAGES_ENDPOINT'),
+            'use_path_style_endpoint' => false,
+            'visibility' => 'private',
+            'throw' => true,
+            'report' => false,
+        ],
+
     ],
 
     /*
