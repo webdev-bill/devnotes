@@ -2366,3 +2366,217 @@ worth fixing in each, though only one of them is actually why the log looked emp
   real Laravel HTTP kernel — the one remaining claim is "and it does the same thing on
   the actual server," which only the user can close by re-attempting the upload and
   checking the log file directly.
+
+## 2026-09-01 — Image Upload, Part 3: Two Real Screenshots, a Second Silent Crash, and Header Hardening
+
+Continuation of the same day's work above. The user re-tested the upload-limit fix live
+against production with a real phone photo and moved on to two follow-up bugs a real
+screenshot surfaced, which led to a second genuinely dangerous silent-crash regression —
+this time introduced by fixing the first bug — plus a small, unrelated hardening request
+found along the way. Same rule as always: logged in full, not compressed into "image
+uploads: done."
+
+### Bug 1 — uploaded cover image rendered sideways
+
+**Symptom:** a real phone photo (with genuine EXIF orientation data) displayed rotated
+90° on the live public page.
+
+**Root cause, confirmed empirically before touching any code, not assumed:** PHP's
+`exif` extension was never installed in either Dockerfile. Built a synthetic-but-real
+JPEG with a hand-spliced EXIF `Orientation=6` APP1 segment (GD has no EXIF writer) and
+confirmed directly: `function_exists('exif_read_data')` was `false`, so Intervention
+Image's decoder (`AbstractDecoder::extractExifData()`, gated behind
+`function_exists('exif_read_data')`) silently returned an **empty** EXIF collection —
+no error, no warning — leaving `AlignRotationModifier` with `IFD0.Orientation === null`
+and nothing to rotate by. Confirmed the fix the same way: with `exif` installed, the
+same synthetic JPEG decoded with the correct orientation and the image's dimensions
+correctly swapped (4x6 → 6x4 for a 90°/270° source, unchanged for 180°/normal).
+
+**Fix:** added `exif` to `docker-php-ext-install` in both `Dockerfile` and
+`Dockerfile.prod`. Also added an explicit `$image->orient()` call in
+`ImageUploadService` — confirmed via `ImageManager::gd()`'s default
+`Config::$autoOrientation = true` that this was already happening automatically on
+decode, so the explicit call is a documented no-op, not the actual fix; kept for
+intent-visibility rather than relying on an implicit library default. Added three new
+tests (`tests/Feature/ImageUploadTest.php`) using the same hand-spliced-EXIF technique
+against two distinct real orientation values (6, 8) plus the no-rotation case (1),
+asserting the *stored WebP's actual pixel dimensions* — not just "no exception."
+
+### Bug 2 — nav tab strip overflowing on desktop
+
+**Symptom:** the authenticated nav (`~/notes.md ~/blog.md ~/tools.md ~/my-notes.md
+~/my-blog.md`, five tabs) no longer fit the tab strip on a real desktop screenshot,
+triggering horizontal scroll — breaking the "open files in an editor" metaphor from the
+2026-08-27 design session. Public visitors only see three tabs, so this was invisible
+until testing while authenticated.
+
+**Measured, not guessed, before proposing a fix:** drove the real dev server over CDP
+(`puppeteer-core` against the existing local Chrome install, same fallback pattern as
+the 2026-08-31 Tools-module session — no browser extension available) and found the tab
+strip's natural width is ~674px, which clears the available nav row above roughly
+800px and starts scrolling below it.
+
+**Approach considered and rejected:** shrinking tab padding/font only recovers ~40-60px,
+nowhere near enough, and truncating labels (`~/my-not…`) undermines the literal-filename
+design principle from the original pass. Wrapping to two rows isn't how real editor tabs
+actually behave (VSCode et al. scroll or truncate, never wrap) and would make the nav's
+height jump depending on auth state.
+
+**Fix:** below Tailwind's `lg` (1024px, chosen with margin above the measured ~800px
+failure point), `~/my-notes.md` + `~/my-blog.md` collapse into one `~/my/` tab with a
+two-item dropdown (`notes.md`, `blog.md`) — read as a directory containing the user's
+own notes/blog, tying into the same directory-listing aesthetic already used on the
+actual `/notes` and `/blog` list pages, rather than a generic bolted-on "More" menu.
+Full five-tab layout unchanged at `lg` and above.
+
+**Real bug hit while building this, not just a styling nit:** the dropdown menu's
+`aria-expanded` state toggled correctly but the menu itself rendered completely
+invisible — caught only by actually taking a screenshot and seeing nothing, not by
+reading the code. Root cause: the tab strip's `overflow-x-auto` implicitly forces
+`overflow-y` to `auto` too — a real CSS behavior (an ancestor can't be "scroll on x,
+visible on y"; the spec computes the other axis as `auto` once one axis is set to
+anything but `visible`) — which silently clipped the absolutely-positioned dropdown
+trying to escape it downward. Fixed by portaling the menu to `document.body` via
+`createPortal`, positioned from the button's own `getBoundingClientRect()` rather than
+a plain `absolute` child — the standard fix for a popover that must escape a clipping
+ancestor.
+
+**Verified with real screenshots**, sent to the user for confirmation per the same
+process as the 2026-08-27 design-fix session: closed collapsed state (900px), the
+dropdown open (900px), and the full unaffected five-tab layout (1280px) — all captured
+via the same CDP method, all showing no overflow (`scrollWidth === clientWidth`
+confirmed at both widths).
+
+### Second silent-crash regression — the EXIF fix itself introduced an OOM crash
+
+**Symptom, found during the user's own live re-test:** the same real 4624×2080 phone
+photo that worked before Bug 1's fix now hard-crashed — HTTP `500`, completely empty
+response body, nothing in `storage/logs/laravel.log`, nothing in nginx's error log, no
+output even with `APP_DEBUG` temporarily forced true directly in
+`docker-compose.prod.yml` (reverted and redeployed by the user before handing this off;
+confirmed clean via `git status` before starting).
+
+**Root cause, confirmed as a hard library constraint by reading the decoder source, not
+assumed:** `Intervention\Image\Drivers\Gd\Decoders\FilePathImageDecoder::decode()`
+applies `AlignRotationModifier` (the EXIF auto-rotate from Bug 1's fix) **inside**
+`read()`, on the full-resolution decoded image — before `scaleDown()` is even reachable
+from `ImageUploadService`. Measured in an isolated PHP process (not a shared PHPUnit
+process, which would contaminate `memory_get_peak_usage()` with every prior test's
+high-water mark) against the real 4624×2080 photo: `read()` alone peaked at **~193MB**,
+over PHP's 128M stock `memory_limit`. This is why `strip: true` looked like a plausible
+culprit in the original bug report but wasn't — the actual cost was the full-resolution
+*rotation* GD performs on decode, not the metadata-stripping encode step.
+
+**Reproduced the actual crash before writing any fix**, exactly as the task required:
+built the real `Dockerfile.prod` locally, ran it as a full container (php-fpm + nginx
+via supervisord, connected to the existing dev Postgres over the `devnotes_default`
+network), logged in and POSTed the same real photo — got the identical symptom: `500`,
+empty body, `storage/logs/laravel.log` didn't even exist, nginx's `error.log` was 0
+bytes. `docker logs` showed only nginx's access-log lines (`... "POST /index.php" 500`)
+and nothing else. Confirmed via a direct CLI invocation that this is a genuinely
+uncatchable PHP fatal (`Allowed memory size of 134217728 bytes exhausted`, exit code
+255) — the class of error that bypasses Laravel's exception handler entirely, which is
+why nothing reached the log even in principle.
+
+**Fix, two parts:**
+
+1. `ImageUploadService` now constructs `ImageManager::gd(autoOrientation: false)` and
+   calls `scaleDown()` **before** `orient()`, instead of relying on the driver's
+   default order. EXIF data is still extracted regardless of that config flag (only
+   the automatic *application* of the rotation is gated by it), so `orient()` still
+   rotates correctly — it now just runs on the already-small image. Measured peak for
+   the same real photo under the new order: **~58MB** (a ~3.3x reduction). Confirmed
+   `scaleDown()`/`orient()` produce identical final dimensions regardless of order
+   (`MAX_DIMENSION` is symmetric on both axes, so this is a pure memory fix, not a
+   behavior change) — all pre-existing image tests passed unmodified.
+2. `backend/docker/uploads.ini`: `memory_limit = 256M` — real headroom above the
+   ~58MB the actual reported photo needs post-fix, checked against an extreme
+   8000×6000 (48MP) synthetic source too (~211MB under the fixed order), without
+   approaching the Droplet's 1GB total RAM.
+
+**The logging gap fixed at the same time — this was the scarier finding.** Confirmed
+directly against the *stock* `php:8.4-fpm` base image (not just this project's build)
+that `log_errors` defaults to `Off` and `error_log` is unset. Even with logging on,
+a php-fpm worker's own stdout/stderr doesn't forward to `docker logs` by default
+(unlike plain CLI) without something explicit routing it there. Fixed with
+`log_errors = On` and `error_log = /proc/self/fd/2` in the same `uploads.ini` — the
+standard containerized-PHP pattern, writing directly to each worker's real stderr file
+descriptor, which `supervisord.conf` already redirects to `/dev/stderr` for php-fpm.
+
+**Verified end-to-end against a real running instance of the fixed image, not just in
+isolation:**
+- Rebuilt `Dockerfile.prod` with both fixes, confirmed via `php -i` that all three
+  directives (`memory_limit => 256M`, `log_errors => On`, `error_log => /proc/self/fd/2`)
+  are actually effective in the built image.
+- Re-ran the exact same upload that crashed before: this time it processed all the way
+  through decode/orient/scale/encode without crashing (surfaced only the expected
+  "missing B2 region" error at the final storage step, since this local container has
+  no B2 credentials by design — and that real Laravel exception's full stack trace was
+  now genuinely present in `storage/logs/laravel.log`, proving the Laravel-level
+  logging path works).
+- To specifically prove the raw-PHP-fatal logging path (not just Laravel's own
+  exception handler), deliberately generated an even larger (9500×7000, ~66MP)
+  synthetic image sized to exceed even the new 256M ceiling, uploaded it to the same
+  running container, and watched the fatal appear directly via `docker compose logs
+  backend`: `NOTICE: PHP message: PHP Fatal error: Allowed memory size of 268435456
+  bytes exhausted...` — closing the loop for real, not inferred from the isolated CLI
+  test alone.
+- Full test suite re-run clean; pushed, deployed, health-checked. The user completed
+  the one piece this session structurally cannot do itself — re-uploading the real
+  photo against live production with real credentials — and confirmed it now works.
+
+### Header hardening — unrelated, found along the way
+
+Both `nginx`'s `Server` header and PHP's `X-Powered-By` header exposed exact version
+numbers (`nginx`, `PHP/8.4.25`) on every response by default — minor but genuine
+reconnaissance value for an attacker narrowing down which CVEs to try. Config-only, no
+app logic touched:
+
+- `backend/docker/nginx.conf`: `server_tokens off;` inside the `server` block (this
+  file has no `http {}` block of its own — it's included as the single server block
+  into the base image's own `nginx.conf` — confirmed by reading the file rather than
+  assuming; `server_tokens` set here is fine given there's only ever one vhost). Drops
+  the version from `Server` (still sends the bare word `nginx`, nginx never removes the
+  header entirely).
+- `backend/docker/uploads.ini`: `expose_php = Off` — drops `X-Powered-By` completely.
+
+**Verified against a local `Dockerfile.prod` build before deploying:** `curl -I`
+confirmed `Server: nginx` (no version) and no `X-Powered-By` header at all. Then, since
+this touches the same `nginx.conf` that `client_max_body_size` lives in, ran a real
+(small) image upload through the same container and confirmed it still processed all
+the way through Laravel (same expected B2-credentials error, not a new one) — proving
+neither change affected request handling. Full test suite re-run clean. Committed
+separately from the memory-crash fix as a distinct `chore:`, per instruction. Deployed,
+health-checked, and confirmed on live production itself: `curl -I
+https://devnotes.billandrewsallao.com/api/tags` shows the same bare `Server: nginx`
+with no `X-Powered-By`.
+
+### A note on the one recurring "16/17 passing" test count
+
+Every test run this session (and the prior one) reports one failure alongside the
+passing image-upload tests: `Tests\Feature\ExampleTest::
+test_the_application_returns_a_successful_response`, which expects `GET /` to return
+`200`. Confirmed genuinely pre-existing and unrelated, not something that started
+failing today, two ways: `git blame`/`git log --follow` on the file show it was created
+in `fa29676` ("feat: scaffold Laravel API backend and React+Vite frontend"), the very
+first backend scaffolding commit on 2026-08-26, and has never been modified since — it's
+the stock Laravel skeleton test, and this has been a pure API-only app with no `/`
+route (no `web.php` at all — see `bootstrap/app.php`'s `withRouting()`) since that same
+first commit. It was also already independently found and logged in an earlier session
+(see the rate-limiting entry above, "Ran the existing backend test suite while in
+there"). Left as-is again — dead scaffold debris, not something either debugging
+session touched, noted here explicitly rather than left to sit unexplained.
+
+### Final status
+
+Both regressions from today, the nav fix, and the header hardening are all deployed to
+production and verified — the EXIF/memory fix by the user's own live re-upload with
+real credentials (the one thing this session structurally cannot do itself), the nav
+fix by real screenshots the user confirmed, the header hardening by live `curl -I`
+against the actual production URL. Total shipped today, across all three parts of this
+session: the full image-upload feature (cover images, inline note images, B2 storage,
+two-tier auth), and seven distinct real bugs/gaps found and fixed through actual
+production use rather than passing in code review — `upload_max_filesize`, a missing
+`--env-file` flag that caused a real login outage, an empty log file (three compounding
+causes), a missing EXIF-orientation extension, a nav overflow, a second silent OOM
+crash the EXIF fix itself introduced, and two exposed version headers.
