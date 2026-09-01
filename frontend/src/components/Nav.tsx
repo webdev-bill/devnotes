@@ -1,4 +1,6 @@
-import { NavLink, useNavigate } from 'react-router'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router'
 import { useAuth } from '../context/useAuth'
 import ThemeToggle from './ThemeToggle'
 
@@ -22,6 +24,106 @@ function Tab({ to, label }: { to: string; label: string }) {
         </>
       )}
     </NavLink>
+  )
+}
+
+// Below `lg`, ~/my-notes.md + ~/my-blog.md (the widest two tabs) no longer
+// fit alongside the rest of the strip — measured, not guessed: the tab
+// strip's natural width is ~674px, which only clears the available nav row
+// width above roughly 800px. Collapsing them into one ~/my/ "directory" tab
+// with a two-item menu ties into the same filesystem literalism as the
+// actual /notes and /blog directory-listing pages, rather than reading as a
+// generic bolted-on "More" menu.
+function MyWorkspaceTab() {
+  const [open, setOpen] = useState(false)
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const location = useLocation()
+  const isActive = location.pathname.startsWith('/my/notes') || location.pathname.startsWith('/my/blog')
+
+  useEffect(() => {
+    if (!open) return
+
+    // Portalled to document.body and positioned via getBoundingClientRect
+    // (not a plain `absolute` child) — the tab strip's own overflow-x-auto
+    // implicitly forces overflow-y to auto too (a real CSS behavior: an
+    // ancestor can't be "scroll on x, visible on y"), which silently clips
+    // any absolutely-positioned child that tries to escape it downward.
+    function updatePosition() {
+      const rect = buttonRef.current?.getBoundingClientRect()
+      if (rect) {
+        setMenuPosition({ top: rect.bottom + 4, left: rect.left })
+      }
+    }
+    updatePosition()
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node
+      const insideButton = buttonRef.current?.contains(target)
+      const insideMenu = menuRef.current?.contains(target)
+      if (!insideButton && !insideMenu) setOpen(false)
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [open])
+
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className={`${tabClass} ${
+          isActive ? 'bg-panel text-ink' : 'text-ink/45 hover:bg-panel/50 hover:text-ink/70'
+        }`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${isActive ? 'bg-keyword' : 'bg-ink/20'}`} />
+        ~/my/
+      </button>
+      {open &&
+        menuPosition &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={{ position: 'fixed', top: menuPosition.top, left: menuPosition.left }}
+            className="z-50 min-w-36 rounded-md border border-rule bg-panel py-1 shadow-md"
+          >
+            <NavLink
+              to="/my/notes"
+              onClick={() => setOpen(false)}
+              className={({ isActive: linkActive }) =>
+                `block px-3 py-1.5 font-display text-xs ${linkActive ? 'text-ink' : 'text-ink/60 hover:text-ink'}`
+              }
+            >
+              notes.md
+            </NavLink>
+            <NavLink
+              to="/my/blog"
+              onClick={() => setOpen(false)}
+              className={({ isActive: linkActive }) =>
+                `block px-3 py-1.5 font-display text-xs ${linkActive ? 'text-ink' : 'text-ink/60 hover:text-ink'}`
+              }
+            >
+              blog.md
+            </NavLink>
+          </div>,
+          document.body,
+        )}
+    </div>
   )
 }
 
@@ -53,8 +155,13 @@ export default function Nav() {
         <Tab to="/tools" label="~/tools.md" />
         {isAuthenticated ? (
           <>
-            <Tab to="/my/notes" label="~/my-notes.md" />
-            <Tab to="/my/blog" label="~/my-blog.md" />
+            <div className="hidden items-end gap-1 lg:flex">
+              <Tab to="/my/notes" label="~/my-notes.md" />
+              <Tab to="/my/blog" label="~/my-blog.md" />
+            </div>
+            <div className="flex items-end lg:hidden">
+              <MyWorkspaceTab />
+            </div>
           </>
         ) : (
           <Tab to="/login" label="~/login.sh" />
