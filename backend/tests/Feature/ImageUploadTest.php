@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ImageUploadTest extends TestCase
@@ -37,6 +38,32 @@ class ImageUploadTest extends TestCase
         imagedestroy($gd);
 
         return $bytes;
+    }
+
+    /**
+     * A real, landscape JPEG (width != height, so a 90/270 rotation is
+     * verifiable by dimension swap alone) carrying a genuine EXIF APP1
+     * segment with the given Orientation tag -- spliced in by hand (PHP's
+     * GD has no EXIF writer), the same technique used to reproduce and then
+     * confirm-fix the sideways-cover-image bug.
+     */
+    private function jpegWithExifOrientation(int $orientation): string
+    {
+        $gd = imagecreatetruecolor(400, 300);
+        imagefill($gd, 0, 0, imagecolorallocate($gd, 200, 50, 50));
+        ob_start();
+        imagejpeg($gd, null, 90);
+        $jpeg = ob_get_clean();
+        imagedestroy($gd);
+
+        $tiff = "II\x2A\x00".pack('V', 8);
+        $tiff .= pack('v', 1);
+        $tiff .= pack('vvV', 0x0112, 3, 1).pack('v', $orientation)."\x00\x00";
+        $tiff .= pack('V', 0);
+        $exif = "Exif\x00\x00".$tiff;
+        $app1 = "\xFF\xE1".pack('n', strlen($exif) + 2).$exif;
+
+        return substr($jpeg, 0, 2).$app1.substr($jpeg, 2);
     }
 
     private function uploadedFileFromBytes(string $bytes, string $name, ?string $mimeType = null): UploadedFile
@@ -71,6 +98,58 @@ class ImageUploadTest extends TestCase
         $this->assertSame('image/webp', $info['mime']);
         // Confirms real re-encoding happened, not a pass-through of the JPEG bytes.
         $this->assertNotSame($this->realJpeg(), $storedBytes);
+    }
+
+    #[DataProvider('exifOrientationsThatSwapDimensions')]
+    public function test_upload_is_rotated_upright_per_exif_orientation(int $orientation): void
+    {
+        Storage::fake('images');
+        $user = User::factory()->create();
+        $note = $user->notes()->create(['title' => 't', 'content' => 'c', 'visibility' => NoteVisibility::Private]);
+
+        // Source is 400x300 (landscape); orientations 6 and 8 are a 90/270
+        // rotation, so a correctly-oriented output must come out 300x400
+        // (portrait) -- this is what actually caught the real bug: without
+        // the exif extension, the stored WebP stayed 400x300 (never
+        // rotated), i.e. sideways.
+        $response = $this->actingAs($user, 'sanctum')->post("/api/my/notes/{$note->id}/images", [
+            'image' => $this->uploadedFileFromBytes($this->jpegWithExifOrientation($orientation), 'photo.jpg'),
+        ]);
+
+        $response->assertCreated();
+
+        $storedBytes = Storage::disk('images')->get(Image::first()->path);
+        $info = getimagesize('data://image/webp;base64,'.base64_encode($storedBytes));
+
+        $this->assertSame(300, $info[0], "width for orientation {$orientation}");
+        $this->assertSame(400, $info[1], "height for orientation {$orientation}");
+    }
+
+    public static function exifOrientationsThatSwapDimensions(): array
+    {
+        return [
+            'orientation 6 (rotate 90 CW)' => [6],
+            'orientation 8 (rotate 270 CW)' => [8],
+        ];
+    }
+
+    public function test_upload_with_normal_exif_orientation_is_not_rotated(): void
+    {
+        Storage::fake('images');
+        $user = User::factory()->create();
+        $note = $user->notes()->create(['title' => 't', 'content' => 'c', 'visibility' => NoteVisibility::Private]);
+
+        $response = $this->actingAs($user, 'sanctum')->post("/api/my/notes/{$note->id}/images", [
+            'image' => $this->uploadedFileFromBytes($this->jpegWithExifOrientation(1), 'photo.jpg'),
+        ]);
+
+        $response->assertCreated();
+
+        $storedBytes = Storage::disk('images')->get(Image::first()->path);
+        $info = getimagesize('data://image/webp;base64,'.base64_encode($storedBytes));
+
+        $this->assertSame(400, $info[0]);
+        $this->assertSame(300, $info[1]);
     }
 
     public function test_valid_png_cover_image_upload_replaces_previous_and_deletes_old_object(): void

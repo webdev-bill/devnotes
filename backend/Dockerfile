@@ -7,6 +7,9 @@ FROM php:8.4-cli
 # client library; git/unzip/zip are needed by Composer to fetch packages.
 # libjpeg-dev/libpng-dev/libwebp-dev + the gd configure flags are needed for
 # Intervention Image to decode/re-encode uploaded images (JPEG/PNG in, WebP out).
+# exif is needed to actually read EXIF orientation data — without it,
+# Intervention's decoder silently gets an empty EXIF collection (no error),
+# so uploaded photos never get auto-rotated and are stored sideways.
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     libjpeg-dev \
@@ -16,7 +19,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     zip \
     && docker-php-ext-configure gd --with-jpeg --with-webp \
-    && docker-php-ext-install pdo pdo_pgsql gd \
+    && docker-php-ext-install pdo pdo_pgsql gd exif \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the official Composer binary instead of installing it via apt/curl.
