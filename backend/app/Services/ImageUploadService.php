@@ -20,7 +20,12 @@ class ImageUploadService
 
     public function __construct()
     {
-        $this->manager = ImageManager::gd();
+        // autoOrientation: false is deliberate — see the comment above
+        // orient() below. Without this, ImageManager::gd()'s default
+        // (autoOrientation: true) applies EXIF rotation *inside* read(),
+        // on the full-resolution decoded image, before scaleDown() is even
+        // reachable from our code.
+        $this->manager = ImageManager::gd(autoOrientation: false);
     }
 
     /**
@@ -33,19 +38,30 @@ class ImageUploadService
     {
         $image = $this->manager->read($file->getRealPath());
 
-        // Explicit, even though ImageManager::gd()'s default config already
-        // applies this automatically on decode (Config::$autoOrientation
-        // defaults to true) — makes the intent visible in our own code
-        // rather than relying on an implicit library default, and is a safe
-        // no-op if the image is already upright or already corrected. Real
-        // bug this guarded against: without the PHP exif extension enabled,
-        // Intervention's decoder gets a silently-empty EXIF collection (no
-        // error, no warning), so there's nothing here to orient by — the
-        // actual fix is the exif extension in the Dockerfiles, not this call.
-        $image->orient();
-
-        // Never upscale a smaller source image.
+        // Never upscale a smaller source image. Deliberately BEFORE orient()
+        // below — this order is a real fix for a real production crash, not
+        // stylistic. With the driver's default autoOrientation (the order
+        // this shipped with originally), EXIF rotation runs inside read(),
+        // on the full-resolution image, before any resize is possible —
+        // GD's rotate has to hold the rotated full-resolution copy alongside
+        // the original momentarily. For a real 4624x2080 phone photo this
+        // measured ~193MB peak, over PHP's 128M stock memory_limit, and hit
+        // a hard, uncatchable "Allowed memory size exhausted" fatal — a
+        // crash with an empty response body and nothing in any log (fatals
+        // of this class bypass Laravel's exception handler entirely; see
+        // uploads.ini for why nothing reached the log either). Scaling down
+        // FIRST, then orienting the now-small image, measured ~58MB peak for
+        // the same photo — orient()/scaleDown() give the same final
+        // dimensions regardless of order (MAX_DIMENSION is symmetric on
+        // both axes), so this is a pure memory fix with no behavior change.
         $image->scaleDown(width: self::MAX_DIMENSION, height: self::MAX_DIMENSION);
+
+        // EXIF orientation data is still attached to $image regardless of
+        // autoOrientation (the decoder always extracts it — only whether it
+        // auto-applies the rotation is gated by that config), so this still
+        // correctly rotates the image; it just now runs on the already-small
+        // copy instead of the full-resolution source.
+        $image->orient();
 
         // strip: true drops EXIF (including GPS) from the re-encoded output,
         // mirroring the client-side WebP tool's (incidental, canvas-redraw)
