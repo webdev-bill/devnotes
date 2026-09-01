@@ -2213,3 +2213,156 @@ No other manual step is required: `deploy.sh` already runs `docker compose ... u
 diffs `backend/database/migrations` to decide whether to run `artisan migrate --force`
 (the two new migrations in this session will be detected and applied automatically on
 the next push to `main`).
+
+## 2026-09-01 — Image Upload Follow-Up: Production Debugging (Upload Limits, an Env-File Outage, and a Log File That Was Never Going to Show Anything)
+
+Once the B2 env vars above were in place and real uploads were attempted against
+production for the first time, several real gaps surfaced that no amount of local
+testing (against `Storage::fake()`, with no B2 credentials at all) could have caught.
+Logged here in full — root cause, symptom, and fix for each — rather than compressed
+into "image uploads: done," per the standing rule that this file is rebuild reference
+and blog raw material, not a sanitized changelog.
+
+### Gap 1: `upload_max_filesize` was PHP's stock 2M default — real photos never reached the app at all
+
+**Symptom:** uploading an ordinary real-world photo (comfortably under the app's own
+5MB/`max:5120` limit) failed with Laravel's generic built-in validation message, "The
+image failed to upload." — which reads like an application bug, not a PHP config gap.
+
+**Root cause:** neither `Dockerfile` nor `Dockerfile.prod` had ever shipped a custom
+`php.ini` — the container was running on the official `php:8.4-fpm` image's own
+compiled-in defaults the whole time: `upload_max_filesize = 2M`, `post_max_size = 8M`.
+Laravel's validator special-cases a failed file upload: when `UploadedFile::isValid()`
+is `false` (which it is here — PHP itself set `error = UPLOAD_ERR_INI_SIZE` before the
+request body was even fully parsed), Laravel skips every other rule for that attribute,
+including `GenuineImageContent` — the request never reaches app code, the finfo/
+getimagesize checks, or `ImageUploadService` at all. This exactly matches what "the
+request never reaches our validation code" means: it's not that our code ran and
+returned a bad message, it's that our code never ran.
+
+**Fix:** `backend/docker/uploads.ini`, loaded automatically from the official php
+image's `conf.d` (any `*.ini` dropped there is picked up with no extra config), copied
+into the image in `Dockerfile.prod`:
+```ini
+upload_max_filesize = 6M
+post_max_size = 8M
+```
+`6M`, not `5M` flush against the app's own limit — headroom for multipart framing
+overhead around the actual file bytes, so a 5.00MB file doesn't get rejected right at
+the boundary. `post_max_size` pinned explicitly at its already-correct value rather than
+left as an implicit, undocumented base-image default that could silently change on a
+future `php:8.4-fpm` base image bump.
+
+**Verified empirically, not just reasoned about:** built `Dockerfile.prod` locally
+(`docker build -f Dockerfile.prod -t devnotes-backend-prod-test .`) and ran `php -i`
+inside the resulting image — confirmed `upload_max_filesize => 6M => 6M` and
+`post_max_size => 8M => 8M` are the actual *effective* values, not just what the ini
+file says on disk (a `conf.d` file placed in the wrong location, or shadowed by a
+later-loaded file, would still say the right thing in the repo while doing nothing).
+Deleted the throwaway image afterward.
+
+### nginx's `client_max_body_size` — checked, no change needed
+
+`backend/docker/nginx.conf` already has `client_max_body_size 20M;`, comfortably above
+the new 6M PHP limit (and the app's own 5MB validation limit) — no part of this chain
+was ever the bottleneck below nginx's own body-size cap. Confirming this explicitly
+rather than silently skipping it: it was checked, not assumed, it just didn't need a
+change.
+
+### Gap 2: a manual command missing `--env-file` caused a real login outage
+
+**Symptom, reported by the user:** while debugging the upload limit directly on the
+Droplet, a manual `docker compose -f docker-compose.prod.yml ...` command run without
+`--env-file .env.production` silently blanked every `${VAR}`-substituted value in the
+backend service's `environment:` block — `APP_KEY`, `DB_PASSWORD`, and everything
+else — breaking login until the container was recreated correctly.
+
+**Root cause:** `docker-compose.prod.yml`'s backend `environment:` block is an explicit
+per-variable allowlist, substituted from `${VAR}` references at `up` time. Compose does
+not error on an undefined reference — it silently substitutes an empty string. `deploy.sh`
+itself already passed `--env-file .env.production` correctly on its one `up` invocation
+(confirmed by re-reading it), so the automated deploy path was never the source of this —
+it was a hand-typed command run directly on the server, outside `deploy.sh` entirely,
+which this repo had no way to protect against.
+
+**Fix:** `scripts/prod-compose.sh` — a thin wrapper (matching the existing
+`scripts/backup-db.sh`/`scripts/restore-db.sh` convention) that hardcodes both
+`-f docker-compose.prod.yml` and `--env-file .env.production`, so any future manual
+command run as `scripts/prod-compose.sh <args>` structurally cannot repeat this
+mistake. `deploy.sh` itself was refactored to call this same wrapper for both of its
+`docker compose` invocations (`up -d --build` and the conditional `migrate --force`)
+instead of repeating the flags inline — not because either was wrong, but so the two
+places this matters (the automated path and any manual one) share a single source of
+truth instead of two copies that could drift apart later.
+
+**Gotcha (recurrence): the executable bit didn't survive creating the new script.**
+Same class of issue as the gitleaks hook and `deploy.sh` itself in earlier sessions —
+`scripts/prod-compose.sh` was created and `chmod +x`'d, but `git add` still staged it as
+`100644`. Fixed with `git update-index --chmod=+x scripts/prod-compose.sh` before
+committing; confirmed `git ls-files -s` showed `100755` afterward.
+
+### Gap 3: `storage/logs/laravel.log` was empty all session — three compounding reasons, only one of them a real bug
+
+Investigated all three angles the debugging session asked about, and found something
+worth fixing in each, though only one of them is actually why the log looked empty:
+
+1. **The real explanation: Laravel doesn't report `ValidationException` by default.**
+   Every failure in this entire debugging session — the PHP-level upload-limit
+   rejection above, and (in earlier testing) the disguised-`.php`-as-`.jpg` and
+   truncated-JPEG rejections — is a plain 422 `ValidationException`. Laravel's default
+   exception handler (`bootstrap/app.php`'s `withExceptions()`, unmodified in this
+   project) deliberately excludes validation failures from `report()` — they're treated
+   as expected client input, not application errors worth logging. **This is standard
+   Laravel behavior, not a bug** — but it fully explains "real requests and failures
+   happening, log file staying empty," independent of any config or permissions issue.
+   Fixed by adding explicit `Log::warning()` calls inside `GenuineImageContent`'s two
+   failure branches (finfo sniff, getimagesize decode), each carrying the original
+   filename, the client's claimed MIME type, and (where relevant) the sniffed one — so
+   a rejected upload now leaves a traceable line without waiting on Laravel's own
+   exception-reporting path, which structurally was never going to log it. Covered by a
+   new test (`test_finfo_rejection_is_logged_since_validation_exceptions_are_not_
+   reported_by_default`) using `Log::spy()` to assert the exact call and its context,
+   not just that *something* got logged.
+2. **`docker-compose.prod.yml` never passed `LOG_CHANNEL`/`LOG_STACK`/`LOG_LEVEL`/
+   `LOG_DEPRECATIONS_CHANNEL` through its explicit env allowlist** — same class of gap
+   as the B2 vars in the previous entry, and as Gap 2 above. `config/logging.php`'s
+   `env()` calls fell back to their own defaults (`stack` → `single`, level `debug`),
+   which happen to still produce a working file channel, so this alone isn't why the
+   log was empty — but it meant `.env.production` had zero actual control over logging
+   regardless of what anyone set there. Fixed by passing all four through, using
+   Compose's `${VAR:-default}` syntax so `.env.production` doesn't need to define any
+   of them unless someone actually wants to override one — unlike the B2 vars, these
+   have safe defaults, so nothing is required of the user here.
+3. **`storage/logs` lived entirely in the container's writable layer, with no
+   persistent volume.** `deploy.sh` runs `up -d --build` on every single push
+   (unconditionally, by design — see the 2026-08-27 CI/CD entry), and several manual
+   `--force-recreate`s happened during this exact debugging session — each one
+   discards the previous container's writable layer outright, taking any accumulated
+   log lines with it. Even with (1) and (2) fixed, anything logged between two
+   recreates would still vanish before anyone got to look. Fixed with a named
+   `backend_logs` volume mounted at `/var/www/html/storage/logs`, matching the existing
+   `db_data`/`traefik_certs` pattern — log history now survives both ordinary redeploys
+   and manual recreates.
+
+### Verification
+
+- Full backend test suite: 13 passing (12 image-upload tests, 1 pre-existing
+  `Unit\ExampleTest`), only the same pre-existing, unrelated `Feature\ExampleTest`
+  failure as every session since this app went API-only (no web routes, that test
+  expects one). `./vendor/bin/pint --test` clean. `gitleaks` clean on both commits.
+- `upload_max_filesize`/`post_max_size` confirmed empirically inside a real local build
+  of `Dockerfile.prod` (see Gap 1) — not just read off the ini file.
+- Pushed to `main`; production health-checked twice (`GET /api/tags`, 20 attempts over
+  5 minutes each time) — all `200`s after the deploy settled. Confirmed the new code is
+  actually live via `GET /api/images/999999` → `404` (route-model-binding on a
+  nonexistent id, correct) both before and after this session's changes.
+- **Not verified by this session, and can't be from here:** an actual successful
+  real-world-photo upload against the live production B2 bucket (the user has the
+  specific photo that originally failed, and browser access to the real UI, neither of
+  which this session has), and confirming a disguised-upload rejection's `Log::warning()`
+  line actually lands in the real `storage/logs/laravel.log` on the server (would need
+  SSH access, which per the standing credential boundary this session doesn't have).
+  The automated test suite proves the log call fires with the right context under a
+  real Laravel HTTP kernel — the one remaining claim is "and it does the same thing on
+  the actual server," which only the user can close by re-attempting the upload and
+  checking the log file directly.
