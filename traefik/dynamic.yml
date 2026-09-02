@@ -1,0 +1,38 @@
+# Traefik dynamic (file-provider) configuration. Loaded via
+# --providers.file.directory=/etc/traefik/dynamic (docker-compose.prod.yml),
+# bind-mounted read-only into the traefik container. This is the single point
+# that terminates TLS and sees every response regardless of which service
+# (backend or frontend) handled it, so security headers live here once,
+# rather than duplicated into backend/docker/nginx.conf and frontend/nginx.conf.
+#
+# See docs/server-setup-runbook.md for the full CSP reasoning (why each
+# directive has the value it does, the hash-vs-nonce decision for the inline
+# theme script, and the connect-src/style-src trade-offs).
+http:
+  middlewares:
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        permissionsPolicy: "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+        # img-src includes blob: (not in the originally-approved value) —
+        # MarkdownImage.tsx and the Tools module's WebP converter both use
+        # URL.createObjectURL(), which produces blob: URLs; data: does not
+        # cover blob: as a separate scheme. Confirmed still present in the
+        # source before adding this. Without it, private note images would
+        # silently fail to render under this CSP.
+        contentSecurityPolicy: >-
+          default-src 'self';
+          script-src 'self' 'sha256-pMOKAf4agxJYV7zaqf3lDLNo2I6lhb/gnSbxk26liA0=';
+          style-src 'self' https://fonts.googleapis.com 'unsafe-inline';
+          font-src 'self' https://fonts.gstatic.com;
+          img-src 'self' data: blob:;
+          connect-src 'self';
+          object-src 'none';
+          base-uri 'self';
+          form-action 'self';
+          frame-ancestors 'none';
+          upgrade-insecure-requests
