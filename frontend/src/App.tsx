@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
+import About from './pages/About'
 import BlogDetail from './pages/BlogDetail'
 import BlogList from './pages/BlogList'
 import Home from './pages/Home'
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="blog/:slug" element={<BlogDetail />} />
         <Route path="tools" element={<ToolsLanding />} />
         <Route path="tools/image-to-webp" element={<ImageToWebpConverter />} />
+        <Route path="about" element={<About />} />
         <Route path="login" element={<Login />} />
 
         <Route element={<ProtectedRoute />}>
