@@ -2617,3 +2617,188 @@ file and its own base image defaults. A server-hardening change verified against
 one of them is not verified for the site as a whole — check both `frontend/nginx.conf`
 and `backend/docker/nginx.conf` (and both containers' actual `curl -I` output) any time
 either gets touched again, not just whichever one is top of mind.
+
+## 2026-09-02 — Standard Defensive Headers via Traefik: Strict-Transport-Security, CSP, and Friends
+
+A security scan flagged the site was missing the standard defensive response headers —
+separate from the `server_tokens`/`expose_php` version-disclosure fix above. Added all
+six via a new Traefik dynamic-config middleware rather than duplicating header logic
+into both nginx configs, since Traefik is the one place that terminates TLS and sees
+every response regardless of which service (backend or frontend) actually handled it.
+
+### Where they live: `traefik/dynamic.yml`, a new file provider
+
+No dynamic-config file provider existed before this — Traefik ran Docker-provider-only,
+with every router/service defined via container labels. Added `--providers.file.directory=
+/etc/traefik/dynamic` and `--providers.file.watch=true` to Traefik's `command:` in
+`docker-compose.prod.yml`, plus a read-only bind mount of the new
+`traefik/dynamic.yml` (authored in the repo, unlike `acme.json` which Traefik generates
+itself). The middleware it defines (`security-headers`) is attached to both routers via
+`traefik.http.routers.<name>.middlewares=security-headers@file` labels — the `@file`
+suffix is mandatory, not stylistic: the routers are Docker-provider objects, and the
+middleware lives in the file provider, so a cross-provider reference has to be
+namespaced or Traefik logs `middleware "security-headers@file" does not exist` and the
+router never applies it (hit this exact error during local testing — see below).
+
+### The six headers
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(), usb=()
+```
+Straightforward, standard values, set via Traefik's first-class `headers` middleware
+fields (`stsSeconds`/`stsIncludeSubdomains`, `contentTypeNosniff`, `frameDeny`,
+`referrerPolicy`, `permissionsPolicy`) rather than the generic `customResponseHeaders`
+escape hatch — confirmed these exact field names against Traefik's own v3 docs before
+writing anything, rather than assuming from v2 muscle memory. `frameDeny: true` rather
+than `customFrameOptionsValue: DENY` — same result, but it's the dedicated field for
+exactly `DENY`, not a generic value-override meant for non-standard cases like
+`SAMEORIGIN`. STS only sends over HTTPS by default (not forced) — fine here, since
+Traefik's HTTP entrypoint already redirects everything to HTTPS before any router with
+this middleware ever sees a plain-HTTP request.
+
+### The CSP — checked against the real frontend code before finalizing, not assumed
+
+```
+default-src 'self';
+script-src 'self' 'sha256-pMOKAf4agxJYV7zaqf3lDLNo2I6lhb/gnSbxk26liA0=';
+style-src 'self' https://fonts.googleapis.com 'unsafe-inline';
+font-src 'self' https://fonts.gstatic.com;
+img-src 'self' data: blob:;
+connect-src 'self';
+object-src 'none';
+base-uri 'self';
+form-action 'self';
+frame-ancestors 'none';
+upgrade-insecure-requests
+```
+
+- **`script-src` stays strict — no `'unsafe-inline'`, ever** (the one directive the plan
+  was explicit could never be relaxed). `frontend/index.html` has exactly one inline
+  script: the anti-flash-of-wrong-theme IIFE that sets `data-theme` before React mounts.
+  Rather than weaken `script-src`, computed the SHA-256 hash of its exact content —
+  from the **built** `frontend/dist/index.html`, not the source file, since Vite's HTML
+  transform can alter whitespace and silently invalidate a hash computed from source.
+  Cross-checked the hash a second way, extracting `index.html` directly from a real
+  build of `frontend/Dockerfile.prod` (not just `npm run build` in the dev container) —
+  identical hash both times, confirming Vite's output for this script is deterministic
+  regardless of build environment. **Hash over nonce, deliberately**: a nonce needs a
+  fresh per-request value injected into both the response header and the script tag,
+  which requires dynamic HTML generation — this app's frontend is a fully static Vite
+  build served by nginx, the same `index.html` bytes for every request, so a nonce isn't
+  achievable without adding a templating layer that doesn't otherwise need to exist. A
+  hash fits a static file naturally. **Trade-off to watch**: this hash is tied to the
+  script's exact byte content — if that script is ever edited, even just reformatted,
+  the hash breaks and the script silently stops executing under CSP (no visible error,
+  just a flash-of-wrong-theme regression on next deploy). Recompute it
+  (`docs/server-setup-runbook.md` has the exact `node` one-liner used, see the
+  2026-09-02 header-hardening session) any time that script changes.
+- **`style-src` needed `'unsafe-inline'`** — confirmed, not assumed, still true at
+  implementation time: three real inline `style={{...}}` usages (`Nav.tsx`'s dropdown
+  menu, positioned dynamically via `getBoundingClientRect()`; `LineNumberedTextarea.tsx`
+  ×2, syncing line-height). All three are genuinely dynamic per-render values — not
+  static content a hash could cover — so the accepted fallback here is relaxing
+  `style-src` specifically, not `script-src`. Inline *styles* aren't the vulnerability
+  class the localStorage-token trade-off in `CLAUDE.md` is about (that's specifically
+  about executing raw HTML/JS, not CSS), so this is a scoped, deliberate relaxation of
+  a much lower-severity directive, not a crack in the actual threat model.
+- **`img-src` needed `blob:` added — a real gap in the originally-approved value, not
+  just theoretical, caught before shipping**: `MarkdownImage.tsx` (the private-note-image
+  renderer built earlier this week) and the Tools module's WebP converter both call
+  `URL.createObjectURL()`, producing `blob:` URLs — `data:` does not cover `blob:` as a
+  separate URL scheme. Verified with both a positive and a negative control against a
+  real running instance of this exact CSP: an `<img src="blob:...">` loads cleanly with
+  `blob:` present in `img-src`, and fails with a real, visible
+  `Refused to load ... violates ... "img-src 'self' data:"` console error the moment
+  `blob:` is removed — proving this is a genuine fix, not a hypothetical worry.
+- **`connect-src 'self'`** — confirmed correct: `VITE_API_URL=/api` is relative/same-origin
+  in production, and grepping the frontend found no other `fetch`/external calls
+  anywhere. **This is the directive most likely to need revisiting as the app grows** —
+  if the API ever moves to a separate origin (a subdomain, a different host), this has
+  to be updated in lockstep or every API call breaks under CSP.
+- No other gaps: no other `<link>`/`<script>` tags in `index.html`, no
+  `dangerouslySetInnerHTML` anywhere in the frontend (confirmed clean against the
+  `CLAUDE.md` constraint too, while already checking).
+
+### Verified locally — a real, if imperfect, equivalent of the prod stack
+
+`docker-compose.prod.yml` can't be run standalone locally as-is (Let's Encrypt's HTTP
+challenge needs real public DNS pointing at this machine), so built a local-only test
+harness: the same `traefik/dynamic.yml` unmodified, real builds of both
+`Dockerfile.prod`s, but Traefik's `websecure`/ACME entrypoint swapped for plain HTTP —
+not committed anywhere, purely a throwaway verification harness.
+
+- **First run genuinely hit `middleware "security-headers@file" does not exist`** — not
+  a config-syntax problem but a Docker bind-mount gotcha: the volume source path (a raw
+  `//wsl.localhost/...` UNC string typed directly into a `volumes:` entry) didn't
+  resolve, and Docker silently created an empty **directory** at the mount target
+  instead of erroring — confirmed by `docker exec`-ing in and finding
+  `/etc/traefik/dynamic/dynamic.yml` was itself a directory. Fixed by using a path
+  relative to the compose file's own location instead (matching how the real
+  `docker-compose.prod.yml` already references it) — a real instance of exactly the
+  error the task asked to watch for, caught and root-caused before it ever reached
+  production.
+- **`upgrade-insecure-requests` correctly broke local HTTP-only testing** — once that
+  directive is active, the browser upgrades every subresource request on the page to
+  `https:`, regardless of whether the top-level page itself loaded over HTTP. Since the
+  local harness has no TLS listener at all, this made every asset fail
+  (`ERR_CERT_AUTHORITY_INVALID`) and the app never mounted. Not a bug — proof the
+  directive works exactly as intended — just incompatible with plain-HTTP local
+  testing. Tested locally with that one directive temporarily removed (kept in the real
+  committed file); production is genuinely HTTPS everywhere via the already-working
+  Let's Encrypt setup, so this only affected the local harness.
+- With that adjustment, drove a real Chrome instance over CDP (`puppeteer-core`, same
+  fallback used throughout this project when the browser extension isn't installed)
+  through every required flow — public notes list/detail, public blog list/detail,
+  login, both dashboards, new/edit note, new/edit post — plus a dedicated theme-toggle
+  check (toggle, then **reload**, confirming the pre-hydration script still ran
+  correctly and the hash genuinely matches — this was the one check a mismatched hash
+  would break silently, with zero visible error). **Zero console errors, zero CSP
+  violations** across all of it.
+- Ran the `blob:`/`img-src` positive/negative control described above against this same
+  running instance.
+- Full backend test suite re-run clean (same pre-existing, unrelated `ExampleTest`
+  failure as every session this week — see below).
+
+### Verified on live production
+
+Pushed as `feat: add security headers via Traefik file-provider middleware`, kept
+separate from the same day's frontend `server_tokens` fix per instruction. Deploy
+health-checked clean (no blip this time — the smoothest deploy of the week). Confirmed
+via `curl -sI` against **both** live routes:
+
+```
+$ curl -sI https://devnotes.billandrewsallao.com/
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-...'; ...
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=(), usb=()
+```
+identical on `/api/tags`. `Strict-Transport-Security` correctly present now that this
+is genuinely served over HTTPS (absent in the local HTTP-only test, as expected).
+
+**Not verified by this session, and can't be from here:** a literal grep of Traefik's
+actual production log for the absence of a "middleware does not exist" error — that
+needs `docker compose -f docker-compose.prod.yml logs traefik`, which needs SSH access
+this session doesn't have. The live headers appearing correctly on both routes is
+strong indirect evidence the `@file` reference resolved (an unresolved middleware
+reference marks the whole router invalid in Traefik, not just skips the middleware —
+so a normal `200` with the right headers is inconsistent with it having failed), but
+that's inference from the local reproduction, not a literal check of the production
+log line itself.
+
+### On the recurring `ExampleTest` failure, once more
+
+Every test run this week reports the same one pre-existing failure alongside whatever's
+actually being tested — confirmed genuinely unrelated and pre-existing (not a new
+regression from any of this week's changes) via `git blame`/`git log --follow` (created
+in the very first scaffolding commit, 2026-08-26, never modified since) and cross-
+referenced against two earlier sessions that already independently found and logged the
+same thing. See the 2026-09-01 "Image Upload, Part 3" entry above for the full citation
+— not re-verifying this every single time going forward, but flagging once more here
+since this entry's test runs show the same count.
