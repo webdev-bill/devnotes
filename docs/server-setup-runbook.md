@@ -2802,3 +2802,88 @@ referenced against two earlier sessions that already independently found and log
 same thing. See the 2026-09-01 "Image Upload, Part 3" entry above for the full citation
 — not re-verifying this every single time going forward, but flagging once more here
 since this entry's test runs show the same count.
+
+## 2026-09-02 — A Static `/about` Page and a Global Footer
+
+Added a static `/about` page so a visitor has a way to find out who built this — no
+backend involvement at all, purely a new frontend route plus a global footer linking to
+it. Small in scope, but one real factual correction surfaced before any code was
+written, worth recording since it shaped how the page was built.
+
+### The task's premise was wrong, and it mattered: a dark theme already exists
+
+The original task description asserted "no dark theme exists — only a single light
+token set" and asked for the page to be built and verified against light mode only.
+That's not true — checked before writing anything: `frontend/src/index.css` has a full
+`[data-theme='dark']` token override block, a working `ThemeContext`/`ThemeToggle`
+(visible on every page via `Nav.tsx`), and the pre-hydration anti-flash script hashed
+into the CSP `script-src` directive just last session exists specifically to support it.
+Flagged this before building rather than either silently complying (which would have
+risked shipping a page that only worked in one theme) or silently building it "my way"
+without saying so.
+
+**Didn't change what got built, though** — the resolution wasn't "add dark-mode
+support," it was "build normally." Every existing page (`NoteDetail`, `Nav`, etc.) gets
+both themes correctly by using the existing token utility classes (`bg-paper`,
+`text-ink`, `border-rule`, `text-keyword`, …) instead of hardcoded colors — that's not
+extra work, it's simply how anything in this app is already styled. `About.tsx` and the
+new footer use the same classes as everything else and inherit both themes for free.
+
+### What shipped
+
+- `frontend/src/pages/About.tsx` — plain semantic HTML (`h1`/`h2`/`p`, no
+  `react-markdown`, no `prose` class — this is static site copy, not user content, so
+  the markdown pipeline doesn't apply), capped at `max-w-2xl` matching `NoteDetail`'s
+  reading measure. Sections in order: bio (with GitHub/LinkedIn/repo links, each
+  `target="_blank" rel="noopener noreferrer"`), Stack, Why this exists, Contact (a plain
+  `mailto:` anchor, deliberately not a form — no backend surface, no spam handling
+  needed for a static page).
+- New route in `App.tsx`: `<Route path="about" element={<About />} />`, alongside the
+  other public routes, no `ProtectedRoute` wrapper.
+- A global footer added to `Layout.tsx` — the one component every route already shares
+  (public pages, `/login`, and the authenticated dashboard all render through it), so
+  this was the correct single place to add something that needed to appear everywhere,
+  no per-page repetition. Sits as a sibling *below* the existing bordered shell box, not
+  inside it, but still inside the same `max-w-6xl` outer container so it lines up
+  horizontally with the shell above. Deliberately no border of its own — the shell's own
+  bottom border is already a clean boundary, and a second one directly beneath would
+  just be redundant weight. Styled in the same "code comment" voice already established
+  for empty states (`NotesDashboard`'s `// nothing here yet...`): the `// ` prefix muted
+  (`text-ink/35`), the actual text readable, the whole line a link. **Not added as a
+  fifth nav tab** — `/about` isn't a content section with its own CRUD, and the nav's
+  tab-strip metaphor is specifically about pages that behave like open files, which this
+  isn't.
+
+### Verified
+
+- `tsc -b && vite build`: clean. `oxlint`: 0 errors, same 2 pre-existing accepted
+  `AuthContext`/`ThemeContext` warnings, nothing new.
+- **Confirmed the CSP `script-src` hash from last session still matches** after this
+  build — this change never touched `index.html`'s inline anti-flash script, but
+  recomputed the hash from the freshly-built `dist/index.html` anyway rather than assume
+  a build with new routes couldn't shift anything: identical
+  (`sha256-pMOKAf4agxJYV7zaqf3lDLNo2I6lhb/gnSbxk26liA0=`) to the value already committed
+  in `traefik/dynamic.yml`.
+- Real Chrome-over-CDP pass (same fallback used all week — browser extension still not
+  installed): route regression check across ten routes (public, `/login`, both
+  dashboards, the new `/about`) — all `200`. Footer confirmed present with the exact
+  expected text on both a public page and `/login`. `/about`'s heading, three section
+  headings, three external links (correct `href`/`rel`), and the `mailto:` link all
+  confirmed via real DOM queries, not just reading the source back.
+- **Dark mode verified via the actual `ThemeToggle` button, not by forcing the
+  `data-theme` attribute in a script** — clicked the real toggle, confirmed
+  `data-theme` flipped, took real screenshots of both states. Both render cleanly: text
+  contrast holds, links use the theme's own keyword-blue token (which is deliberately a
+  lighter/more saturated shade in dark mode per the token block — see the earlier design
+  session's contrast rationale), and the footer's muted/full-contrast split reads
+  correctly in both. (This session's own screenshot filenames ended up swapped — dark
+  mode is the default in this browser's system preference here, so the "before toggle"
+  capture was dark and the "after" was light, backwards from the filenames' own naming
+  — worth noting only because it briefly looked like a bug in the terminal output before
+  actually opening the images; the app's behavior was correct throughout.)
+- Pushed as `feat: add static /about page and global footer link`, gitleaks clean.
+  Deploy health-checked clean (no blip, clean run). **Confirmed on live production**
+  via both `curl -sI` (`/about` → `200`) and a real Chrome pass against the actual live
+  site: heading, sections, and footer all render correctly on both `/about` and
+  `/notes`, zero console errors — confirming the CSP from last session tolerates this
+  change with no adjustment needed.
