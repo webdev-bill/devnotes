@@ -2580,3 +2580,40 @@ production use rather than passing in code review — `upload_max_filesize`, a m
 `--env-file` flag that caused a real login outage, an empty log file (three compounding
 causes), a missing EXIF-orientation extension, a nav overflow, a second silent OOM
 crash the EXIF fix itself introduced, and two exposed version headers.
+
+## 2026-09-02 — Header Hardening Follow-Up: `server_tokens` Missed the Frontend's Own nginx
+
+The previous entry's header-hardening fix (`server_tokens off` + `expose_php = Off`)
+verified clean at the time via `curl -I` against `/api/tags` — but that route is served
+by the **backend's** nginx (`backend/docker/nginx.conf`, fronting php-fpm). A later
+`curl -sI` against the actual site root (`https://devnotes.billandrewsallao.com/` — the
+primary, highest-traffic user-facing route) turned up `Server: nginx/1.31.4`, version
+and all, completely unaffected by that fix.
+
+**Root cause:** the frontend is a *separate* nginx instance — `frontend/nginx.conf`,
+serving the built static SPA from its own `nginx:alpine` container
+(`frontend/Dockerfile.prod`) — not the same nginx process or config file as the
+backend's. The earlier session's fix only ever touched `backend/docker/nginx.conf`;
+`frontend/nginx.conf` was never edited, so it kept running on `nginx:alpine`'s own
+stock default (`server_tokens` on) the whole time. Verifying against `/api/tags` alone
+couldn't have caught this — that path never touches the frontend container at all.
+
+**Fix:** added the identical `server_tokens off;` to `frontend/nginx.conf`'s `server`
+block (this file has no `http {}` block either — same reasoning as the backend's copy,
+included as the one vhost into the base image's own `nginx.conf`).
+
+**Verified before deploying**, same rigor as every other Dockerfile change this
+project: built `frontend/Dockerfile.prod` locally, ran it, `curl -I` against it directly
+— confirmed `Server: nginx` with no version number. Pushed as its own commit (`fix:
+disable server_tokens in frontend nginx to stop version disclosure`), kept separate
+from any other work in flight per instruction. Deploy health-checked clean (two normal
+transient blips during the container swap, same pattern as every deploy this week).
+**Confirmed on live production itself**: `curl -sI https://devnotes.billandrewsallao.com/`
+now returns `Server: nginx` with no version, matching the backend's route.
+
+**Lesson worth carrying forward:** this app has *two* independent nginx instances
+(frontend's static-file server, backend's php-fpm front end), each with its own config
+file and its own base image defaults. A server-hardening change verified against only
+one of them is not verified for the site as a whole — check both `frontend/nginx.conf`
+and `backend/docker/nginx.conf` (and both containers' actual `curl -I` output) any time
+either gets touched again, not just whichever one is top of mind.
