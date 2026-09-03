@@ -13,4 +13,9 @@ export const tools: ToolManifestEntry[] = [
     name: 'Image → WebP',
     description: 'Convert JPG, PNG, and other raster images to WebP, entirely in your browser.',
   },
+  {
+    slug: 'qr-code-generator',
+    name: 'QR Code Generator',
+    description: 'Generate a QR code for a URL, plain text, or Wi-Fi network, entirely in your browser.',
+  },
 ]

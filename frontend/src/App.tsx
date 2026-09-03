@@ -7,6 +7,7 @@ import BlogList from './pages/BlogList'
 import Home from './pages/Home'
 import ImageToWebpConverter from './pages/ImageToWebpConverter'
 import Login from './pages/Login'
+import QrCodeGenerator from './pages/QrCodeGenerator'
 import BlogDashboard from './pages/my/BlogDashboard'
 import BlogForm from './pages/my/BlogForm'
 import NoteForm from './pages/my/NoteForm'
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="blog/:slug" element={<BlogDetail />} />
         <Route path="tools" element={<ToolsLanding />} />
         <Route path="tools/image-to-webp" element={<ImageToWebpConverter />} />
+        <Route path="tools/qr-code-generator" element={<QrCodeGenerator />} />
         <Route path="about" element={<About />} />
         <Route path="login" element={<Login />} />
 
