@@ -2887,3 +2887,95 @@ new footer use the same classes as everything else and inherit both themes for f
   site: heading, sections, and footer all render correctly on both `/about` and
   `/notes`, zero console errors — confirming the CSP from last session tolerates this
   change with no adjustment needed.
+
+## 2026-09-04 — Tools Module: JSON Formatter/Validator
+
+Third tool in `/tools`, alongside Image → WebP and the QR Code Generator: a client-side
+JSON pretty-printer/validator at `/tools/json-formatter`, registered the same way as the
+other two (`tools/registry.ts` entry + route in `App.tsx`, no changes needed to
+`ToolsLanding.tsx` itself). Entirely frontend — no backend/API involvement.
+
+### What shipped
+
+- `frontend/src/pages/JsonFormatter.tsx` — a `LineNumberedTextarea` for raw input (same
+  component the note/blog forms use), a 2-space/4-space indent toggle driving
+  `JSON.stringify(parsed, null, n)`, and an output panel that's either the pretty-printed
+  result or a structured error box, computed via `useMemo` on `[input, indent]` so it
+  never needs a submit action — output updates live as you type or toggle indent.
+- A "copy to clipboard" control that only renders when `result.status === 'success'` —
+  there's no valid output to copy in the idle or error states, so the control doesn't
+  exist in the tree rather than existing-but-disabled.
+
+### Key decision: no syntax highlighting in v1 — deliberately deferred
+
+The approved plan called this out explicitly rather than leaving it implicit. A
+highlighter is real added attack surface for a tool whose entire job is validating
+untrusted-looking input: it would need its own tokenizer, and that tokenizer's output
+becoming DOM structure is exactly the kind of thing that deserves its own security look
+before it ships, not a footnote on this session. Plain `<pre><code>` text is correct for
+v1; highlighting is a follow-up with its own review, not a "quick addition" later.
+
+### Key decision: the escaping guarantee is structural, not tested-in
+
+Output renders via `<pre><code>{formattedText}</code></pre>` using React's default JSX
+text interpolation — never `dangerouslySetInnerHTML`, anywhere in the component. This is
+the same class of constraint CLAUDE.md already states for the `react-markdown` raw-HTML
+rule, applied to a new surface: the guarantee is that React's own escaping makes
+executable markup structurally impossible in this output, not that a list of malicious
+inputs was tried and came back clean. There's no auth or user data on this page — the
+risk being closed is to whoever's browser is running the tool, not to any stored data.
+
+### Custom error handling: line/column + snippet, not `JSON.parse`'s raw message
+
+`JSON.parse`'s own error text is a raw character offset embedded in an engine-specific
+sentence (V8: `"...at position 41"`) — not something a person can act on while looking at
+a textarea. `describeJsonError()` pulls that offset back out via
+`message.match(/position (\d+)/)`, walks the input up to that offset counting newlines to
+get a 1-indexed line/column, and pulls the actual offending source line out of the input
+to display alongside a caret under the exact column. Falls back to showing `JSON.parse`'s
+raw message unchanged if no `position N` pattern is found (e.g. a differently-worded
+engine message) — a plain but honest fallback rather than a confident wrong answer.
+
+### Verification
+
+**By Claude Code, this session:**
+- `tsc -b && vite build`: clean. `oxlint`: 0 errors, same 2 pre-existing accepted
+  `AuthContext`/`ThemeContext` warnings, nothing new introduced.
+- Parsing/error-extraction logic unit-tested directly against the real functions (copied
+  into a throwaway Node script in the scratchpad directory, not the repo) across five
+  cases: valid JSON at both 2- and 4-space indent (correct output both times), a
+  missing-comma input (correctly reported line 3, column 3, with the actual offending
+  line text), and an unclosed-brace input (correctly reported the EOF position).
+- **XSS structural check via `react-dom/server`** — rendered the exact
+  `<pre><code>{formatted}</code></pre>` pattern (via `renderToStaticMarkup`, run inside
+  the frontend container so `react`/`react-dom` resolved correctly) with a parsed JSON
+  value containing `"<script>alert(1)</script>"` as a string. Confirmed the output HTML
+  contains `&lt;script&gt;` and **does not** contain the literal substring
+  `<script>alert(1)</script>` anywhere — proof the escaping is real, not just a visual
+  read of the rendered page.
+
+**By the user, in a real browser (no `claude-in-chrome` extension available again this
+session):** live 2-space/4-space re-formatting on toggle, the copy-to-clipboard button
+appearing only with valid output and actually copying, both malformed-JSON cases showing
+sensible line/column + snippet output, and — the important one — the
+`{"payload": "<script>alert(1)</script>"}` case confirmed via actual DOM inspection (not
+just the visual result) to render as escaped text, not a real `<script>` element.
+
+This closes, for this tool, a gap earlier tool-building sessions had flagged but left
+open: frontend behavior that only a static render or a code read had confirmed, with
+nobody actually watching the shipped code run in a live browser. Here the DOM-level XSS
+check was done **two ways** — the static `react-dom/server` render (this session, no
+browser needed) and the live served HTML in an actual running browser, DOM-inspected by
+the user — so the security-critical claim is backed by both a structural proof and a
+real observed run, not one or the other.
+
+### Deploy
+
+Committed as `feat: add JSON formatter/validator tool (indent toggle, line/column error
+reporting)` (`e8b4324`), gitleaks pre-commit hook ran clean, pushed to `main`. GitHub
+Actions run #34 completed successfully. **Confirmed on live production**: `curl` against
+`https://devnotes.billandrewsallao.com/tools/json-formatter` returned `200`, and the
+deployed JS bundle was fetched and grepped directly to confirm it — not a stale
+cache — actually contains this session's code (`json-formatter` route string, the
+`"Invalid JSON at line"` error-message prefix, and the `"copy to clipboard"` button
+text all present in the live bundle).
