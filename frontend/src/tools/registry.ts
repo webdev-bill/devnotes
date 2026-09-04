@@ -18,4 +18,9 @@ export const tools: ToolManifestEntry[] = [
     name: 'QR Code Generator',
     description: 'Generate a QR code for a URL, plain text, or Wi-Fi network, entirely in your browser.',
   },
+  {
+    slug: 'json-formatter',
+    name: 'JSON Formatter',
+    description: 'Pretty-print and validate JSON, with line/column error reporting, entirely in your browser.',
+  },
 ]
