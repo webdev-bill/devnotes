@@ -5,8 +5,9 @@ import { API_URL } from '../api/client'
 import { imagePath } from '../api/images'
 import ErrorState from '../components/ErrorState'
 import LoadingState from '../components/LoadingState'
-import MarkdownImage from '../components/MarkdownImage'
 import { useFetch } from '../hooks/useFetch'
+import { markdownComponents, markdownRemarkPlugins } from '../markdown/markdownConfig'
+import { proseClassName } from '../markdown/proseClassName'
 
 export default function BlogDetail() {
   const { slug } = useParams<{ slug: string }>()
@@ -32,9 +33,13 @@ export default function BlogDetail() {
         />
       )}
       {/* Same constraint as NoteDetail — no rehype-raw, no raw HTML
-          passthrough. See CLAUDE.md. */}
-      <div className="prose dark:prose-invert mt-6 max-w-2xl">
-        <ReactMarkdown components={{ img: MarkdownImage }}>{post.content}</ReactMarkdown>
+          passthrough (the ::video{...} directive support included via
+          markdownRemarkPlugins doesn't relax this either — see
+          remarkVideoDirective.ts). See CLAUDE.md. */}
+      <div className={proseClassName}>
+        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} components={markdownComponents}>
+          {post.content}
+        </ReactMarkdown>
       </div>
     </div>
   )

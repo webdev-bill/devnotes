@@ -3,9 +3,10 @@ import { useParams } from 'react-router'
 import { getPublicNote } from '../api/notes'
 import ErrorState from '../components/ErrorState'
 import LoadingState from '../components/LoadingState'
-import MarkdownImage from '../components/MarkdownImage'
 import TagPills from '../components/TagPills'
 import { useFetch } from '../hooks/useFetch'
+import { markdownComponents, markdownRemarkPlugins } from '../markdown/markdownConfig'
+import { proseClassName } from '../markdown/proseClassName'
 
 export default function NoteDetail() {
   const { id } = useParams<{ id: string }>()
@@ -28,16 +29,20 @@ export default function NoteDetail() {
       <h1 className="mt-4 font-display text-xl font-semibold text-ink">{note.title}</h1>
       {/* Constrained to a readable line length even though the shell itself
           is wide now — a wide workspace panel doesn't mean wide paragraphs. */}
-      <div className="prose dark:prose-invert mt-6 max-w-2xl">
+      <div className={proseClassName}>
         {/*
           NEVER add rehype-raw (or any plugin enabling raw HTML passthrough)
           here. This is user-authored markdown rendered for arbitrary
           visitors — allowing raw HTML would be a stored XSS hole, and the
           app's auth token sits in localStorage specifically on the
           assumption that this renderer never executes injected HTML.
-          See CLAUDE.md.
+          The `::video{...}` directive support (markdownRemarkPlugins) never
+          passes author-supplied strings through as markup either — see
+          remarkVideoDirective.ts. See CLAUDE.md.
         */}
-        <ReactMarkdown components={{ img: MarkdownImage }}>{note.content}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={markdownRemarkPlugins} components={markdownComponents}>
+          {note.content}
+        </ReactMarkdown>
       </div>
     </div>
   )

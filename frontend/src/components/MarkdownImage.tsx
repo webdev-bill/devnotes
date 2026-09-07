@@ -1,9 +1,14 @@
+import type { ReactElement } from 'react'
 import { useEffect, useState } from 'react'
 import { fetchImageObjectUrl } from '../api/images'
 
 type MarkdownImageProps = {
   src?: string
   alt?: string
+  // `![alt](src "title")` — react-markdown forwards the markdown title
+  // attribute here. Only present when the author wrote one, so it's the
+  // caption trigger: no title, no <figure> wrapper, unchanged markup.
+  title?: string
 }
 
 type LoadedFor = { src: string; url: string } | { src: string; failed: true }
@@ -14,7 +19,17 @@ type LoadedFor = { src: string; url: string } | { src: string; failed: true }
 // JS and swap in a blob: object URL instead (see api/images.ts). Anything
 // else (a hand-typed external URL) renders as a normal <img> — never routed
 // through fetchImageObjectUrl, so the token is never sent to a third party.
-export default function MarkdownImage({ src, alt }: MarkdownImageProps) {
+function withCaption(img: ReactElement, title: string | undefined) {
+  if (!title) return img
+  return (
+    <figure>
+      {img}
+      <figcaption>{title}</figcaption>
+    </figure>
+  )
+}
+
+export default function MarkdownImage({ src, alt, title }: MarkdownImageProps) {
   const isOwnImage = src?.startsWith('/images/') ?? false
   // Tagged with the src it resolved for, so a still-loading new src doesn't
   // briefly render the previous src's (already stale) result — see below.
@@ -49,7 +64,7 @@ export default function MarkdownImage({ src, alt }: MarkdownImageProps) {
 
   if (!isOwnImage) {
     // eslint-disable-next-line jsx-a11y/alt-text -- alt is passed through from markdown, may legitimately be empty
-    return <img src={src} alt={alt ?? ''} />
+    return withCaption(<img src={src} alt={alt ?? ''} />, title)
   }
 
   // Ignore state left over from a previous src while the new one is in flight.
@@ -64,5 +79,5 @@ export default function MarkdownImage({ src, alt }: MarkdownImageProps) {
   }
 
   // eslint-disable-next-line jsx-a11y/alt-text -- alt is passed through from markdown, may legitimately be empty
-  return <img src={current.url} alt={alt ?? ''} />
+  return withCaption(<img src={current.url} alt={alt ?? ''} />, title)
 }
