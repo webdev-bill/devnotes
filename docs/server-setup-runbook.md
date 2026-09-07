@@ -2979,3 +2979,103 @@ deployed JS bundle was fetched and grepped directly to confirm it — not a stal
 cache — actually contains this session's code (`json-formatter` route string, the
 `"Invalid JSON at line"` error-message prefix, and the `"copy to clipboard"` button
 text all present in the live bundle).
+
+## 2026-09-07 — Tools Module: JWT Decoder (Decode-Only, No Signature Verification)
+
+Fourth tool in `/tools`: a client-side JWT decoder at `/tools/jwt-decoder`, registered the
+same way as the other three (`tools/registry.ts` entry + route in `App.tsx`). Entirely
+frontend — no backend/API involvement.
+
+### The one thing this tool must never imply
+
+A JWT decoder is an easy tool to accidentally oversell: decoding the header/payload and
+*verifying the signature* are completely different operations, and a user who pastes a
+token, sees two clean JSON panels, and walks away thinking "this token checked out" has
+been actively misled. This build deliberately:
+- Never calls itself a "validator" or "verifier" anywhere in UI copy — title, description,
+  and disclaimer all say "decode."
+- Puts the "not verified" disclaimer *above* the input, styled with real visual weight
+  (`amber-500` border/background/heading — a color not otherwise used in this codebase's
+  palette, chosen specifically so it reads as a distinct warning class from the existing
+  `flag` red already claimed by actual error states — don't reuse one color for two
+  different meanings). Body copy explicitly states decoding success is not proof of
+  authenticity.
+- Displays the signature segment as an inert opaque string (labeled "raw, not decoded")
+  rather than attempting to decode it as base64url JSON — it isn't JSON, and decoding
+  attempts on it would be meaningless at best, misleading at worst.
+
+### Same escaping guarantee as the JSON formatter, same reasoning
+
+Header and payload render via `<pre><code>{jsonString}</code></pre>` — React's default JSX
+escaping, never `dangerouslySetInnerHTML`. Identical pattern and identical rationale to
+`JsonFormatter.tsx` (see the 2026-09-04 entry above): the guarantee is structural (React
+cannot execute markup handed to it as a plain string child), not "we tried some payloads
+and they came back clean" — though the payloads were tried too, see Verification below.
+
+### Decode logic: three distinct error cases, each with its own message
+
+`decodeJwt()` in `JwtDecoder.tsx` splits on `.` and requires exactly 3 segments (error:
+wrong segment count, with the actual count in the message). Each of header/payload is
+base64url-decoded (`atob` after `-`/`_` → `+`/`/` translation and re-padding — a regex
+guard on the base64url alphabet runs first so obviously-invalid input fails fast with a
+clear message rather than a stack-trace-flavored `atob` error) then `JSON.parse`d — a
+failure at either step produces its own distinct message ("not valid base64url" vs.
+"decoded but is not valid JSON"), because they're different failures a person debugging a
+token actually wants to tell apart. The signature segment only gets the base64url-alphabet
+check (it's never JSON-parsed) since a malformed signature has a place to be reported too.
+
+### Gotcha: this session's local build tooling was broken by a pre-existing Windows/UNC path issue, unrelated to this change
+
+The Claude Code session here runs on the Windows host, addressing this WSL-mounted repo
+via a `\\wsl.localhost\Ubuntu\...` UNC path. `npm run build`/`npm install` at that path
+fail outright — `tsc`/`vite` invoked through npm's script runner hit "UNC paths are not
+supported" from `cmd.exe`, and `npm install` itself hit `EPERM` creating nested
+`node_modules/@scope` directories over the UNC path. This is a Windows-npm-over-UNC
+limitation, not anything introduced by this change, and it fully blocked local
+`tsc -b && vite build`/`oxlint` from the host shell.
+
+**Worked around by using the already-running `devnotes-frontend-1` dev container**
+instead — it bind-mounts the repo, so the new file was already visible inside it. Ran the
+real `npm run build` and `npm run lint` *inside the container* (`docker exec
+devnotes-frontend-1 sh -lc "cd /app && npm run build"`, same for lint) rather than
+approximating them. Worth remembering for the next session that hits the same "tsc/vite
+won't run from the host shell" wall on this machine — the container is right there and
+already has working `node_modules`.
+
+### Verification
+
+**By Claude Code, this session:**
+- `tsc -b && vite build` (run inside `devnotes-frontend-1`, see gotcha above): clean build,
+  254 modules, no type errors.
+- `oxlint` (same container): 0 errors, the same 2 pre-existing `AuthContext`/`ThemeContext`
+  fast-refresh warnings the JSON formatter session noted, nothing new from this file.
+- Decode/error logic tested directly against the real functions (copied into a throwaway
+  Node script in the scratchpad directory, not the repo) across five cases: a real
+  three-segment JWT (both panels decode correctly, signature shown raw), a two-segment and
+  a four-segment input (both correctly report "Expected 3 segments... found N"), a header
+  segment containing characters outside the base64url alphabet (correctly reported as
+  invalid base64url), and a validly-base64url-encoded but non-JSON payload (correctly
+  reported as "decoded but is not valid JSON").
+- **XSS structural check via `react-dom/server`**, run inside the frontend container so
+  `react`/`react-dom` resolved correctly — rendered the exact
+  `<pre><code>{payloadJson}</code></pre>` pattern with a payload claim of
+  `<script>alert(1)</script>`. Confirmed the output HTML contains `&lt;script&gt;` and does
+  **not** contain the literal substring `<script>alert(1)</script>` anywhere.
+- **Not done this session, and worth flagging rather than papering over**: no live
+  browser/DOM-inspection pass (no `claude-in-chrome` or equivalent browser-automation tool
+  available in this session, unlike the JSON formatter session where the user did that
+  half). The claims above are backed by a real build, a real lint pass, real decode-logic
+  execution, and a structural render-escaping proof — not by anyone actually looking at the
+  rendered page in a browser. If that matters, a quick pass at
+  `https://devnotes.billandrewsallao.com/tools/jwt-decoder` closes the gap.
+
+### Deploy
+
+Committed as `feat: add JWT decoder tool (header/payload decode, no signature
+verification)` (`026fcbb`), gitleaks pre-commit hook ran clean, pushed to `main`. GitHub
+Actions deploy completed. **Confirmed on live production**: `curl` against
+`https://devnotes.billandrewsallao.com/tools/jwt-decoder` returned `200`, and the deployed
+JS bundle was fetched and grepped directly to confirm it actually contains this session's
+code (`jwt-decoder` route string, the `"JWT Decoder"` and `"Not verified"` copy, and the
+`"not valid base64url"` error-message text all present in the live bundle) — not a stale
+cache serving the previous build.
