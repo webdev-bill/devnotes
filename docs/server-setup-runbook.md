@@ -3079,3 +3079,165 @@ JS bundle was fetched and grepped directly to confirm it actually contains this 
 code (`jwt-decoder` route string, the `"JWT Decoder"` and `"Not verified"` copy, and the
 `"not valid base64url"` error-message text all present in the live bundle) — not a stale
 cache serving the previous build.
+
+## 2026-09-07 — Markdown Typography + Constrained `::video{}` Embeds (No Raw HTML)
+
+Two changes to how `NoteDetail`/`BlogDetail` render markdown: real typographic hierarchy
+via `@tailwindcss/typography`'s per-element `prose-*` modifiers, and a `::video{provider=
+"..." id="..."}` directive for YouTube/Vimeo embeds — without ever enabling raw HTML
+passthrough. The CLAUDE.md constraint (`react-markdown` must never execute raw HTML,
+because the Sanctum token's localStorage storage is only safe *because* of that) was the
+one thing this session was built around, not a checkbox to satisfy afterward.
+
+### Why a directive, not `rehype-raw`, and why that's not just a preference
+
+`rehype-raw` (or any raw-HTML-passthrough plugin) would let a note/post author's literal
+`<iframe>`/`<script>` text become real, executing markup — exactly the stored-XSS path
+CLAUDE.md's localStorage trade-off is betting against. A video embed feature built on top
+of that would be building a new feature on top of reopening the hole the rest of the app's
+security model assumes is closed. So no part of this uses it — full stop, and there was no
+point in this build where a weaker version would have been the only way through; if there
+had been, the plan (shown to the user before any code was written, per this session's
+instructions) would have said so instead of quietly shipping it.
+
+Instead: `remark-directive` parses `::video{...}` into a plain **mdast** node
+(`leafDirective`) — a markdown-level AST node, not HTML. A custom remark plugin
+(`remarkVideoDirective.ts`) then does one of exactly two things with it, entirely in
+mdast-land:
+- valid `(provider, id)` → tag the node with `data.hName`/`data.hProperties` (a standard,
+  long-established `mdast-util-to-hast` convention — not a hack) naming a specific,
+  code-chosen tag (`video`, never reachable from real markdown syntax otherwise) and
+  exactly two properties. `react-markdown`'s `components` map then renders *that* tag with
+  our own `VideoEmbed.tsx`, which **re-validates** the provider/id pair independently
+  before building the iframe `src` — the component never trusts that the remark pass ran
+  correctly, on the theory that the thing constructing a URL should be the thing that last
+  checked it's safe to construct.
+- anything else (bad provider, bad id shape, an unrecognized directive name, or the
+  inline/container directive forms — only the `::name{}` leaf form is handled, matching
+  the approved plan's syntax) → replaced with a plain mdast **text** node reading e.g.
+  `[invalid video embed — provider="eviltube" id="dQw4w9WgXcQ"]`. A plain mdast text node
+  can only ever become an escaped string in the output — there's no path from "malformed
+  directive" to "something executes."
+
+No author-supplied string is ever used to build the `src` — the regex-validated `id`
+(charset excludes `/`, `.`, `?`, `&`, so it can't smuggle a path segment or query string)
+is the only thing interpolated, into a URL whose scheme+host is a hardcoded literal
+(`youtube-nocookie.com` / `player.vimeo.com`) chosen by this code, never by the post
+author.
+
+### Typography
+
+`proseClassName.ts` centralizes the `prose-*` modifier string so `NoteDetail`/`BlogDetail`
+can't drift apart (they were duplicating the plain `"prose dark:prose-invert..."` string
+before this). Headings get `font-display` (the app's mono token) with distinct
+size/weight steps, `h2` gets a bottom border, paragraphs get `font-body`/`leading-relaxed`/
+`text-ink/90`, blockquotes get the keyword-colored left border + italic, images get
+`rounded-lg`/`max-w-full` (capped by the container's existing `max-w-2xl`, no separate cap
+needed). Image captions (`![alt](src "caption")`) reuse Typography's built-in
+`figure`/`figcaption` recipe — react-markdown already forwards the markdown `title`
+attribute as a `title` prop to whatever renders `img`, so `MarkdownImage.tsx` just wraps in
+`<figure>` when a title is present (unchanged markup when it isn't, so existing images
+without captions don't shift). One accepted cosmetic quirk: a captioned *standalone* image
+line ends up as `<p><figure>...</figure></p>` — `<figure>` block content nested inside a
+markdown-auto-added `<p>`, technically invalid HTML nesting that browsers silently correct
+(splitting the paragraph) with no visible effect here since there's nothing else in that
+paragraph. Inherent to how react-markdown wraps inline image nodes; not worth restructuring
+the image-rendering pipeline to avoid.
+
+### Gotcha: this session got interrupted mid-verification by a dropped connection
+
+The first pass at this entry ended right after confirming `/blog` and `/notes` both
+returned `200` on production — then the connection dropped, and the next message picked up
+"continuing from last session" asking for the same live verification again. Nothing about
+the shipped code changed between the two passes; what changed is that finishing the
+verification the second time surfaced two things the first pass hadn't reckoned with yet
+(both below), which made the eventual verification *stronger* than what had been planned
+originally — worth recording here so a future session doesn't have to rediscover either.
+
+### Gotcha: `curl`-ing a post's live URL can never show its rendered content — this app has no SSR
+
+Asked to `curl` a post detail page and confirm `prose-h1`/video-embed/escaped-text markup
+"actually appears in the rendered output" — checked this directly rather than assuming it:
+fetched `/blog`, a real post's slug, a nonexistent slug, and `/` on production and diffed
+them. **Byte-identical** — all three are just the SPA shell (`<div id="root">`, no
+content). This app does no server-side rendering; every post's real content only exists
+after client-side JS runs in a browser. No `curl` against any post URL, real, fake, or
+malicious-content-carrying, will ever reveal it — this is architectural, not something
+either a better `curl` invocation or more patience would fix.
+
+Flagged this to the user directly rather than quietly substituting a weaker check that
+would have looked like it satisfied the request without proving anything. Also flagged,
+and did not do unilaterally: creating the malicious-content/malformed-directive test posts
+*on the real production blog* — that's user-visible to any real visitor loading that page
+in the window the content exists, and doing it requires production credentials this
+session doesn't hold (and per standing guidance, shouldn't go get itself). Given the
+choice, the user picked the automated option below over creating the posts themselves.
+
+### Verification: running the actual deployed production bundle in headless Node, not a re-creation of it
+
+Stronger than the JWT Decoder/JSON Formatter sessions' approach (copying logic into a
+throwaway script, or SSR-ing the source through `react-dom/server`) — this time the
+**exact minified bundle already live at `index-DTV6gxob.js`** was fetched from production
+and actually executed, DOM included, via `jsdom` (installed with `npm install --no-save`
+inside the `devnotes-frontend-1` dev container specifically so it never touched
+`package.json`/`package-lock.json` — removed again after) plus a small harness script
+(built in the scratchpad directory, copied in via `docker cp`, deleted after):
+
+- **Getting the real bundle to run at all took two fixes.** jsdom doesn't execute
+  `<script type="module">` at all (a long-standing, documented limitation) — but this
+  build has zero top-level `import`/`export` statements (single-chunk build, no
+  route-level code splitting), so the fix was running it as a classic script instead.
+  The one remaining module-only construct left in the bundle, `import.meta` (inside
+  react-router's lazy-route-module resolver, dead code here since this app has no route
+  splitting), is a syntax error outside real module parsing — textually replaced with a
+  stub object exposing the same `.url`/`.resolve` shape the code's own ternary already
+  falls back on. Second: jsdom (this version) has no `window.fetch`/`window.Response` at
+  all — the mock's `new window.Response(...)` was throwing *inside* the async mock
+  function, which silently became a rejected promise, which `useFetch`'s `catch` folded
+  into its generic `"Something went wrong."` message — indistinguishable from a real bug
+  until traced back. Fixed by using Node's own native global `Response` instead.
+- **Mocked `fetch` only, not the backend.** No local test database/content was created —
+  `window.fetch` was intercepted to return, for three fabricated slugs
+  (`test-typography-and-video`, `test-malicious-tags`, `test-malformed-directive`), a
+  JSON object matching the *exact* shape of a real `BlogPost` API response (checked against
+  a real live post's actual `GET /api/blog-posts/:slug` response first, field-for-field,
+  rather than assumed from the TypeScript type alone).
+- **Typography + video case**: real DOM output confirmed `<h1>`/`<h2>`/`<h3>`, a
+  `<blockquote><p>`, `<figure><img/><figcaption>` for the captioned image, and — the part
+  that matters most — both `<iframe>`s present with exactly the expected attributes:
+  `src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"` and
+  `src="https://player.vimeo.com/video/76979871"`, `sandbox="allow-scripts
+  allow-same-origin allow-presentation"`, `referrerpolicy="no-referrer"`,
+  `loading="lazy"`, correct `title`. (jsdom's own attempt to actually load and execute
+  *those* iframes' real YouTube/Vimeo page scripts produced a wall of unrelated errors the
+  first run — `resources: 'usable'` was making jsdom fetch real third-party subresources,
+  irrelevant to verifying our own output; removed once recognized as noise, not a bug.)
+- **Malicious-tags case**: the literal text `<script>alert(1)</script>` and `<iframe
+  src="https://evil.example">` rendered as an HTML-escaped string inside a `<p>` — and,
+  not stopping at reading the serialized string, a direct DOM query
+  (`document.querySelectorAll('script')`/`('iframe')`, filtered to the injected content)
+  confirmed **zero** real `<script>` elements containing `alert(1)` and **zero** real
+  `<iframe>` elements pointed at `evil.example` anywhere in the actual live DOM tree.
+- **Malformed-directive case**: a bad provider (`eviltube`), a bad id shape (deliberately
+  containing `;drop table`, an injection-shaped payload, to confirm it's just inert text
+  and not interpreted as anything), and an unrecognized directive name (`::note{...}`) all
+  rendered as their bracketed fallback text, each on its own line, none silently dropped.
+- Left no trace afterward: harness script, fetched bundle/HTML copies, and the temporary
+  `jsdom` install were all removed from the container; `git status` confirmed clean before
+  and after (nothing was ever written to production — every "post" here was a mocked
+  `fetch` response, never a real database row).
+
+This is the actual shipped artifact — not source re-executed through Vite, not logic
+copied into a throwaway script — running exactly as a browser would run it, missing only
+the browser window itself.
+
+### Deploy
+
+Committed as `feat: prose typography for markdown content + constrained ::video{} embeds
+(youtube/vimeo, no raw HTML)` (`ca75777`), gitleaks pre-commit hook ran clean, pushed to
+`main`. GitHub Actions deploy completed (bundle hash changed from `index-CB_Ks-Jb.js` to
+`index-DTV6gxob.js`, polled via `Monitor` rather than blind sleeps). New dependencies,
+cost/attack-surface impact: see the completion report in the conversation this session was
+part of — all confirmed no-impact except the two new MIT-licensed packages
+(`remark-directive`, plus `unist-util-visit` promoted from an already-present transitive
+dependency to a direct one).
