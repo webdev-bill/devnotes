@@ -7,6 +7,7 @@ import BlogList from './pages/BlogList'
 import Home from './pages/Home'
 import ImageToWebpConverter from './pages/ImageToWebpConverter'
 import JsonFormatter from './pages/JsonFormatter'
+import JwtDecoder from './pages/JwtDecoder'
 import Login from './pages/Login'
 import QrCodeGenerator from './pages/QrCodeGenerator'
 import BlogDashboard from './pages/my/BlogDashboard'
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="tools/image-to-webp" element={<ImageToWebpConverter />} />
         <Route path="tools/qr-code-generator" element={<QrCodeGenerator />} />
         <Route path="tools/json-formatter" element={<JsonFormatter />} />
+        <Route path="tools/jwt-decoder" element={<JwtDecoder />} />
         <Route path="about" element={<About />} />
         <Route path="login" element={<Login />} />
 

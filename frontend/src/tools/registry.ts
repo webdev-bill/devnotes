@@ -23,4 +23,10 @@ export const tools: ToolManifestEntry[] = [
     name: 'JSON Formatter',
     description: 'Pretty-print and validate JSON, with line/column error reporting, entirely in your browser.',
   },
+  {
+    slug: 'jwt-decoder',
+    name: 'JWT Decoder',
+    description:
+      'Decode a JWT header and payload, entirely in your browser. Decodes only — does not verify the signature.',
+  },
 ]
