@@ -3623,3 +3623,181 @@ run completed with `success`. **Confirmed on live production**:
   upload endpoints themselves) is verified working end-to-end in dev against the identical
   code path — this is the one piece intentionally left for a manual pass against the real
   production login rather than sharing/using real credentials in this session.
+
+## 2026-09-15 — Bug Hunt: Bot Preview Showing Empty Description/Image in Production
+
+Reported as: the OG/meta-tag feature from earlier today "isn't working" — a live meta-tag
+preview tool showed empty description and image for the homepage, while the favicon (built
+the same session) worked fine. Two real, distinct bugs were found and fixed. Neither was
+config drift, missing `site_settings` data, or a Blade rendering bug — those three hypotheses
+were all explicitly ruled out early, with evidence, before looking further.
+
+### Ruled out first, with direct evidence, not assumption
+
+- `curl -A "facebookexternalhit/1.1" https://devnotes.billandrewsallao.com/` and the same
+  with `Twitterbot/1.0`: both returned a fully populated response (`og:title`, `og:description`
+  ="Hi", `og:image` pointing at a real, separately-confirmed-reachable 40KB JPEG,
+  `twitter:*`) — the nginx resolver fix and Traefik `/storage` routing from the original
+  session were both confirmed still correctly live in production, immediately ruling out
+  "config didn't actually deploy."
+- `GET /storage/og/default.jpg` → `200 image/jpeg`, confirming `site_settings` genuinely has
+  real data saved (a description and an OG image) — ruling out "nobody filled in the
+  dashboard yet."
+- Since the above two were both fine, the Blade view/controller logic was also implicitly
+  cleared — it was producing correct output for the UAs it was reached with.
+- Checked whether Cloudflare might be caching/serving stale HTML independent of the origin:
+  response headers show `Server: nginx`, no `CF-RAY`/`cf-cache-status` — Cloudflare is
+  DNS-only here (matches the original stack-decision table above), not a proxying CDN. Ruled
+  out as a cause.
+
+### Official validators are now all login-gated — could not get an authoritative result from any of them
+
+Facebook Sharing Debugger, Twitter's (deprecated) Card Validator, and LinkedIn's Post
+Inspector all required a login this session doesn't have. This is a real limitation worth
+recording: **the standard way to independently verify OG tags without owning login
+credentials for any of the big three no longer really exists.** Fell back to a public,
+no-login tool (`opengraph.xyz`) to get *some* independent signal, plus direct raw-HTTP
+inspection (which is actually the more rigorous ground truth for "what does our server
+return," independent of any third party's rendering of it).
+
+### Bug #1 (the originally-reported one): curated crawler UA list was too narrow
+
+`opengraph.xyz` reproduced the exact reported symptom — title/description/image/twitter
+tags all reported "missing," with `<title>` falling back to the value baked into the static
+`index.html`. That's precisely what a tool sees when it hits the plain, un-rendered SPA
+shell rather than the bot-preview path: not a rendering bug, a *routing* gap — the crawler's
+UA isn't one of the ten literal strings the nginx `map` recognized.
+
+Fixed by adding a second, broader match to the same `map`: any UA **not containing
+"Mozilla"** is now also routed to bot-preview, in addition to the named list. Reasoning:
+every browser has carried a "Mozilla/5.0" compatibility token for decades; essentially no
+simple bot/crawler/OG-checker tool spoofs a full browser UA (the named list itself proves
+this — every one of those ten strings already lacks "Mozilla" too). This catches unknown/
+future tools without needing to enumerate them by name. Accepted, explicit tradeoff (signed
+off on before implementing, since this touches the same nginx file the original propose-then-
+build architecture review covered): a tool that *does* fully spoof a browser UA still falls
+through to the SPA — unchanged and out of scope for this fix.
+
+Also had to add an explicit empty-string map entry (`"" 1;`). Real, confirmed nginx quirk:
+`map` does **not** evaluate regex entries against an empty source value at all — an absent/
+empty `User-Agent` header always resolves to `default` regardless of any regex that would
+otherwise match empty. Found by adding a temporary `add_header X-Debug-Is-Bot $is_bot_preview
+always;` to a locally-running build and observing it return `0` for a UA-less request even
+though the negative-lookahead regex should have matched — confirmed via testing, not assumed
+from nginx docs.
+
+### Bug #2 (found *during* investigation, more serious than #1): the bot check was intercepting real static files, including `robots.txt`
+
+While chasing bug #1, checked `GET /robots.txt` directly and found: there was no real
+`robots.txt` in this project at all — `frontend/public/` never had one, so the SPA's
+catch-all (`try_files $uri $uri/ /index.html`) served the **React app shell**, `200`, at
+that path. A compliant crawler that can't parse `robots.txt` as valid directives may
+conservatively refuse to crawl the site at all — a very plausible explanation for a
+well-behaved tool showing nothing, independent of bug #1.
+
+Worse: this also revealed the `if ($is_bot_preview) { rewrite ...; }` check had been running
+unconditionally for *every* path under `location /` since the bot-preview feature was first
+built, including real static assets. A crawler fetching `/robots.txt` (or `/favicon.svg`, or
+a hashed JS/CSS bundle) with the same non-browser UA it uses for the page itself would get
+**our bot-preview HTML instead of the real file** — wrong `Content-Type`, unparseable content,
+for every static asset a crawler might touch. The previous session's own test matrix actually
+exercised this (`curl -A Slackbot .../favicon.svg` → `200 text/html`) and reasoned it away as
+harmless ("real crawlers don't crawl static assets under their own UA") — true for most
+assets, but `robots.txt` specifically *is* something every well-behaved crawler fetches, and
+getting HTML there is a real problem.
+
+Fixed by restructuring the location blocks so real files are always tried first, completely
+outside the bot-check path:
+```nginx
+location / {
+    try_files $uri @spa_or_bot;
+}
+location @spa_or_bot {
+    if ($is_bot_preview) {
+        rewrite ^ /__bot-preview-dispatch last;
+    }
+    try_files /index.html =404;
+}
+```
+Added `frontend/public/robots.txt` (`User-agent: *` / `Allow: /`) — Vite copies `public/`
+verbatim into the build root, so this is now a real static file, served identically
+regardless of UA.
+
+**Caught a self-inflicted regression in this very fix, before it shipped.** First draft used
+`try_files $uri $uri/ @spa_or_bot;` (kept the `$uri/` alternative from the original). Testing
+every route individually (not just trusting the restructure) found the exact root path `/`
+silently stopped reaching the bot check — every *other* route worked. Cause: `$uri/`, for `/`
+specifically, matches the docroot directory itself, which makes nginx apply the `index
+index.html;` directive directly and never reach the named `@spa_or_bot` location at all — a
+real, non-obvious nginx behavior (directory-index resolution short-circuits before a named
+fallback location is ever considered). Fixed by dropping `$uri/` entirely (`try_files $uri
+@spa_or_bot;`) — no real subdirectory in this build needs directory-index behavior, so there
+was nothing to lose.
+
+### `opengraph.xyz` still shows the old, broken result — and that's very likely their own cache, not ours
+
+After both fixes were live and independently verified via direct curl, re-ran the exact same
+`opengraph.xyz` scan against the production homepage: **byte-for-byte identical output** to
+before either fix — same "5 issues," same fallback title, nothing changed. This was checked
+three separate times across three different (verified-working) deployments, always identical.
+
+Evidence this is `opengraph.xyz`'s own caching, not a real remaining bug on this end:
+- Their own UI has a "Rescan" button, implying the default view for a previously-seen URL is
+  a cached report, not a fresh fetch.
+- Attempting to click "Rescan" programmatically hit a login/signup modal intercepting the
+  click — consistent with rescanning being gated behind an account, same as the official
+  tools.
+- **Control test**: ran the identical tool against `github.com` (a known-good, unrelated
+  site) and got a completely different, detailed, *correct* report (image dimensions,
+  character counts, all tags present) — proving the tool itself works correctly in general
+  and isn't just broadly unreliable right now.
+- A separate control request to `httpbin.org/user-agent` (attempting to capture the tool's
+  actual crawler UA by pointing it at a request-echoing endpoint) returned "Failed to fetch
+  URL" — consistent with their scanner requiring an HTML response to parse, unrelated to this
+  site specifically.
+
+Given direct, repeated, raw-HTTP verification against production (the actual ground truth of
+what the server returns) is unambiguous and correct, and a third party's cached view of an
+old scan is outside anything a server-side fix can affect, this was not chased further. The
+one thing this session could not do: force a fresh re-scrape through any of the official,
+login-gated tools to get a final human-visible confirmation — left for a manual pass, same
+reasoning as the favicon/OG-upload check left open in the previous entry.
+
+### Verification
+
+**By Claude Code, this session:**
+- Reproduced the reported symptom for real via `opengraph.xyz` before touching any code —
+  did not guess at a fix blind.
+- Ruled out config drift, missing data, Cloudflare caching, and a Blade rendering bug, each
+  with a specific, direct test (see above), before looking for the actual cause.
+- Both fixes built and tested locally first (same pattern as the original session): real
+  prod `frontend/Dockerfile.prod` image, attached to the dev Compose network to reach the
+  real backend, a 9-case curl matrix covering real browsers (homepage + deep route), all
+  required named crawlers, a generic unknown non-Mozilla tool, `robots.txt`/`favicon.svg`/a
+  JS bundle under a bot UA, and the internal-only dispatch location — before either fix was
+  pushed.
+- The homepage-specific regression from the first draft of the location restructuring was
+  caught by this same local matrix, not shipped and found later.
+- Re-verified the full matrix against **live production** after each deploy: required
+  crawlers still return fully populated `og:*`/`twitter:*` tags; real browser UA on both the
+  homepage and a deep route returns the unchanged SPA shell; `/robots.txt` now returns real
+  `text/plain` directives regardless of UA.
+
+### Deploy
+
+Two commits, two deploys:
+- `fix: broaden bot-preview detection beyond the named crawler list` (`48b145e`) — the
+  Mozilla-token heuristic + empty-UA fix.
+- `fix: stop bot-preview dispatch from intercepting static files` (`0c9d3b2`) — the
+  location restructuring + `robots.txt`.
+
+Both: gitleaks pre-commit hook ran clean, pushed to `main`, GitHub Actions "Deploy to
+Production" completed with `success`, confirmed against the live domain with the exact
+required `curl` commands from the original bug report plus the expanded matrix above.
+
+**Standing checklist** (per `CLAUDE.md`): no new dependency (frontend or backend) — this was
+entirely `frontend/nginx.conf` config plus one new static `robots.txt` file. No cost/infra
+impact — same containers, same resources, no new outbound calls. No new attack surface —
+`robots.txt` is a standard, expected, fully public file; the location restructuring makes
+static-file serving *more* correct (real files always served as themselves) with no new
+write path or exposed data.
