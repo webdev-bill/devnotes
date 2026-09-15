@@ -3801,3 +3801,185 @@ impact — same containers, same resources, no new outbound calls. No new attack
 `robots.txt` is a standard, expected, fully public file; the location restructuring makes
 static-file serving *more* correct (real files always served as themselves) with no new
 write path or exposed data.
+
+## 2026-09-16 — Bug Hunt Part 2: metatags.io Still Broken — UA Detection Hits a Fundamental Wall
+
+Reported as: metatags.io still showed no description/image for the homepage after the
+previous session's two fixes. Diagnosed with real production log evidence before changing
+anything (not assumed) this time, given the previous session's own lesson about verifying
+against ground truth.
+
+### Evidence from production nginx/backend logs
+
+- metatags.io's actual request: `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+  AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36`, `Referer:
+  https://metatags.io/`, from metatags.io's own server IP — a completely standard desktop
+  Chrome UA, consistent with a server-side headless-Chrome render service.
+- Response: `200`, 1578 bytes — identical size to every real-browser `GET /` in the same
+  log window, confirming it got the plain SPA shell.
+- `grep`'d backend logs across the same window for `bot-preview`: zero matches — the
+  dispatch never fired for this request.
+
+### Root cause: this is a fundamental limit of UA/header-based bot detection, not an incomplete list
+
+The current heuristic (`~*^(?!.*Mozilla).*$` — "no Mozilla token = bot") cannot catch this,
+and neither would the inverse (an allowlist of "known real browser" UA patterns): modern
+"new headless" Chrome (what Puppeteer/Playwright-based tools like metatags.io use) was
+deliberately built by Google to be network-indistinguishable from headed Chrome — same UA,
+same `sec-ch-ua`/`sec-fetch-*` client-hint headers, no `Headless` token. Confirmed this
+isn't specific to metatags.io: there is no signal in the request itself (other than the
+`Referer`, which is tool-specific and not a real fix — see rejected options below) that
+distinguishes "a browser a human is looking at" from "a browser being driven headlessly to
+fetch one page and read the DOM." Any UA-based classifier, in either direction, will keep
+missing tools built this way.
+
+### Options considered and rejected
+
+- **Add metatags.io (and future tools like it) to a named UA-substring list.** Rejected:
+  there's no substring to match — the UA is byte-for-byte standard Chrome. Would only work
+  by keying off `Referer` instead, which is fragile (not every tool sends one) and is
+  exactly the "special-case by name" pattern explicitly ruled out for this fix — it doesn't
+  generalize to the next tool.
+- **Invert the default (bot-preview-unless-known-real-browser-UA).** Rejected for the same
+  underlying reason: metatags.io's headless Chrome *is* a known-real-browser UA pattern, so
+  it would pass an allowlist just as easily as it passes today's denylist.
+- **Full dynamic head-injection rewrite** (always route every document request through
+  Laravel to resolve and inject per-URL meta tags, dropping UA detection and the static SPA
+  shell entirely). This is the structurally complete fix — no detection dependency at all,
+  correct per-post tags for literally anyone — but explicitly deferred, not built, this
+  session: it turns every full-page load into a PHP round-trip (plus a DB lookup on post
+  URLs) instead of a free static nginx response, a real new load-pattern change on a $6/mo
+  single-vCPU Droplet, to solve a narrower case (generic non-social-crawler tools hitting
+  *specific blog post* URLs) than what was actually reported (the homepage). Revisit if a
+  future session needs correct per-post tags for arbitrary/anonymous checker tools, not just
+  named social crawlers.
+
+### Fix actually built: bake site-wide default tags into the static build, keep the existing bot-preview path as-is
+
+- **`frontend/scripts/inject-meta.mjs`** (new file, zero new dependencies — Node 20 built-in
+  `fetch`/`fs`/`path` only) fetches `GET {SITE_BASE_URL}/api/site-settings` and writes
+  HTML-escaped `<title>`/`<meta description>`/OG/Twitter tags into `frontend/index.html`
+  between `<!-- STATIC_META_TAGS_START/END -->` markers, before Vite builds it. Same
+  escaping approach as the existing `bot-preview.blade.php` (escape every interpolated
+  value, unconditionally) — consistent with this project's existing structural-escaping
+  principle, not a new pattern.
+- Wired in as an npm **`prebuild`** hook (`frontend/package.json`) — npm's automatic
+  `pre<script>` convention means `npm run build` always runs it first, with zero changes
+  needed to `Dockerfile.prod`'s `RUN npm run build` line or to `deploy.sh`'s build
+  invocation itself.
+- **No-ops safely, by design, in two cases** — never fails a build:
+  - `SITE_BASE_URL` unset (local/dev builds don't pass it) → skips the fetch entirely,
+    `index.html` stays exactly as authored (empty markers, "devnotes" title) — verified.
+  - Fetch fails for any reason (unreachable, non-200) → catches the error, logs one line,
+    leaves `index.html` untouched — verified by pointing it at a closed port.
+- **`SITE_BASE_URL`** is a new Docker build `ARG` (`Dockerfile.prod`), wired to
+  `https://${DOMAIN}` in `docker-compose.prod.yml`'s frontend build `args:` — `DOMAIN`
+  already exists in `.env.production` for Traefik's routing rule, so this needed no new
+  `.env` entry. Deliberately a separate variable from `VITE_API_URL`: that one is
+  intentionally relative (`/api`) in production for same-origin browser requests, which
+  can't be fetched from a Docker build stage that has no browser origin at all.
+- **Existing UA-based bot-preview path (`frontend/nginx.conf`'s `map`, `BotPreviewController`)
+  left completely untouched** — still the only path that resolves real per-post
+  `meta_title`/`meta_description`/`og_image_path` overrides, still correct for the named
+  social crawlers it's confirmed to work for.
+
+### Gotcha found and fixed during local verification: Docker layer caching would have silently defeated the whole point
+
+First build-and-verify pass: changed a `SiteSettings` value directly in the dev DB, rebuilt
+the frontend image with the exact same `docker build` invocation as before (nothing in the
+build context — no source file — had changed), and the **old** value was still baked in.
+Cause: Docker's layer cache keys the `RUN npm run build` layer on its inputs (the preceding
+`COPY . .` and `ARG`s), none of which change when only a database row changes — so a
+redeploy triggered solely to refresh the bake (e.g. after editing `/my/settings`) would
+silently no-op forever, never re-fetching. This directly matters for this fix's whole
+purpose, so it was caught and fixed before calling this done, not shipped as a latent gap:
+added `ARG CACHEBUST=0` immediately before `RUN npm run build` in `Dockerfile.prod` (the
+standard, documented Docker cache-busting pattern — a changing `ARG` value invalidates that
+layer and everything after it, without needing to be referenced inside the `RUN` itself),
+wired to `docker-compose.prod.yml`'s frontend build `args:`, and `deploy.sh` now `export`s
+`CACHEBUST="$NEW_SHA"` (the just-pulled commit SHA, already computed there for the deploy
+log line) right before calling `up -d --build`. An empty commit (`git commit --allow-empty`)
+still produces a new SHA, so this also covers "I only changed settings, nothing in code" —
+confirmed by reproducing the exact stale-cache failure first, then rebuilding with a
+different `CACHEBUST` value and confirming the fresh value was picked up.
+
+### Accepted, documented gap
+
+A generic tool that isn't one of the named social crawlers (i.e. anything not in
+`frontend/nginx.conf`'s `map`) hitting a **specific blog post URL** gets the site-wide
+default title/description/image baked into the shared `index.html`, not that post's actual
+`meta_title`/`meta_description`/OG image override — those still only reach the named social
+crawlers, via the untouched bot-preview path. This is strictly better than the pre-fix
+behavior (empty tags entirely) but is not per-post-correct for that specific combination.
+Accepted as-is given actual usage patterns (the reported bug was the homepage, not a generic
+tool checking a specific post); revisit only if that combination turns out to matter later —
+the full dynamic rewrite considered and rejected above is the actual fix for it if so.
+
+### Verification
+
+**By Claude Code, this session, against a real local build of the production image (not
+just code review):**
+- Built `frontend/Dockerfile.prod` for real (`docker build`), attached to the dev Compose
+  network to reach the real local backend, `SITE_BASE_URL` pointed at it.
+- Confirmed the no-op paths first, before ever testing the happy path: no `SITE_BASE_URL` →
+  `index.html` byte-identical to the authored template; `SITE_BASE_URL` pointed at a closed
+  port → same, plus a logged skip reason, build still succeeded.
+- **The actual reported bug**: `curl` with a plain, unspoofed desktop Chrome UA (the exact
+  UA class metatags.io sent, confirmed from production logs) against the built image's
+  homepage now returns fully populated `<meta name="description">`, `og:title`,
+  `og:description`, `og:image`, and `twitter:*` tags in the raw first-response HTML — no
+  waiting on client JS, no UA spoofing needed to see it.
+- **Facebook/Twitter regression check**: since the official Facebook Sharing
+  Debugger/Twitter Card Validator are login-gated (per the previous session's finding),
+  spoofed `facebookexternalhit`/UA-matched requests against a blog post URL on the built
+  image confirmed the existing bot-preview path still returns that post's real per-post
+  `og:*`/`twitter:*` tags, completely unchanged.
+- **`robots.txt` regression check**: a non-Mozilla UA against `/robots.txt` on the built
+  image still returns the real file, `200 text/plain`, unaffected.
+- **Real-browser regression check**: a standard Chrome UA against a deep SPA route
+  (`/blog/some-post`) still returns the full app shell (`<div id="root">`, the real script
+  tag) — real browsers are unaffected and still get a working app, just with better default
+  tags than before (the accepted gap above) rather than none.
+- **Settings-update/redeploy behavior** (the thing this fix changes from the original
+  "no redeploy needed" design goal): changed `meta_description` directly in the dev DB,
+  confirmed `/api/site-settings` (the dynamic endpoint real browsers' client-side
+  `react-helmet-async` still uses) reflected it immediately, while the *already-built*
+  image's static homepage tags stayed on the old value until rebuilt — then confirmed a
+  rebuild (with a fresh `CACHEBUST`) picks up the new value. This is now a documented,
+  intentional trade-off: the static homepage/generic-page fallback needs a redeploy to
+  refresh (a plain `git commit --allow-empty -m "chore: refresh baked meta tags" && git
+  push` is enough, no code change required); the dynamic client-side tags for actual
+  visiting browsers remain instant, same as before this fix.
+- `npm run build`'s full chain (`prebuild` → `tsc -b` → `vite build`) ran clean inside the
+  Docker build with no errors. `package-lock.json` diffed against the base commit:
+  unchanged, confirming no dependency was added.
+- **Not verified this session**: `oxlint` — the local Windows/UNC-path shell environment
+  couldn't invoke it directly (a pre-existing environment limitation, reproduced identically
+  against the *unmodified* `lint` script too, so unrelated to this change) and mounting the
+  UNC-path working tree into a throwaway Linux container for it didn't work either. `tsc -b`
+  itself did run clean, inside the real Docker build, which is the stronger of the two type
+  checks.
+
+### Deploy
+
+Not yet deployed as of this entry — pending final review before pushing. Files changed:
+`frontend/index.html`, `frontend/package.json`, `frontend/scripts/inject-meta.mjs` (new),
+`frontend/Dockerfile.prod`, `docker-compose.prod.yml`, `deploy.sh`.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies**: none. `frontend/scripts/inject-meta.mjs` uses only Node 20's
+  built-in `fetch`/`node:fs`/`node:path` — no new `package.json` entry, confirmed
+  `package-lock.json` has zero diff against the base commit.
+- **Cost/infra impact**: none at steady state. The only new work is one outbound HTTPS call
+  during the frontend Docker *build* step (which already happens on this same droplet for
+  every deploy) — no new container, no new runtime service, no new per-request server cost.
+  The previously-existing bot-preview path (which does add a per-request backend hit, but
+  only for the named social crawlers, unchanged) is untouched.
+- **New attack surface**: none. The injected values come from the same already-public,
+  already-authenticated-write-only `SiteSettings` data this feature already exposed via
+  `/api/site-settings` and the bot-preview Blade view; every interpolated value is
+  HTML-escaped before being written to the static file (mirroring the existing Blade
+  `{{ }}` escaping approach), verified structurally correct the same way the original
+  bot-preview session verified it (escaping a value containing `<`/`>`/`&`/`"` and
+  confirming the raw output, not just reading the code). No new write path, no
+  `dangerouslySetInnerHTML`, no `eval`.
