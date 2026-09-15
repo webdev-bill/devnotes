@@ -3384,3 +3384,242 @@ isn't a stale cache serving the previous build.
    this feature, no raw SQL (no backend involvement at all), no `eval`/`new Function`, and
    no new unauthenticated write path (there's nothing to write — `localStorage`/server state
    are both untouched by this feature).
+
+## 2026-09-15 — Website Settings + Bot-Only Social Preview Rendering
+
+Dashboard-editable site settings (title, default meta description, favicon, Twitter handle,
+default OG image) at `/my/settings`, plus nullable per-post `meta_title`/`meta_description`/
+`og_image` overrides on `BlogForm`'s new collapsible SEO section — falls back to the
+site-wide defaults when unset. This is the first feature in this project to touch
+`nginx.conf`, `docker-compose.prod.yml`, and `deploy.sh` all at once, and the first to ever
+use Laravel's `public` disk / `storage:link` or Blade views (this app has been API-only,
+React-only, up to now) — logging the reasoning in full since a future session needs to
+understand *why* a "no SSR" app suddenly has one Blade view and a `resources/` directory.
+
+### Why a bot-only server-rendering path exists at all
+
+Social-media link-preview crawlers (Facebook, Twitter, Slack, Discord, LinkedIn, ...) do not
+execute JavaScript — they fetch the raw HTML at a URL and read whatever `<meta>`/OG tags are
+already in the document. This SPA's `index.html` ships an almost-empty `<div id="root">`;
+everything else is rendered by React after JS runs. So a purely client-side fix
+(`react-helmet-async`, added here too, for real browsers and JS-executing crawlers like
+Googlebot) can *never* produce a correct Slack/Twitter/Discord/Facebook unfurl — those
+crawlers would see the same empty shell no matter what tags React eventually injects. The
+only fix is serving the correct tags in the very first HTTP response, for crawler traffic
+only, without turning the whole app into a general server-rendered mode (see "keeps the
+public/private split intact" below).
+
+### Architecture: nginx User-Agent map → internal proxy → a narrow public Laravel endpoint
+
+`frontend/nginx.conf` gained a `map $http_user_agent $is_bot_preview` block (case-insensitive
+`~*` regex matches) above the existing `server {}` — this file has no `http {}` block of its
+own, its contents get spliced directly into the stock `nginx:alpine` image's `http` context,
+so a `map` directive is valid here even though only a `server` block existed before. Matched
+UAs: `facebookexternalhit`, `Twitterbot`, `Slackbot`, `Discordbot`, `LinkedInBot`, `WhatsApp`,
+`TelegramBot` (all required), plus three judgment calls: `Pinterest` and `redditbot` (both
+real, common link-unfurl crawlers for a content site), and `SkypeUriPreview` (Skype's chat
+link-preview fetcher). Deliberately **not** matched: Googlebot/Bingbot — they execute JS
+reasonably well today, so they get the normal SPA + `react-helmet-async`, same as a human.
+
+Dispatch uses the one nginx-docs-documented-safe use of `if` in a `location` block (a single
+`rewrite ... last`, which restarts location matching rather than trying to buffer/merge
+directives):
+```nginx
+location / {
+    if ($is_bot_preview) {
+        rewrite ^ /__bot-preview-dispatch last;
+    }
+    try_files $uri $uri/ /index.html;
+}
+location = /__bot-preview-dispatch {
+    internal;
+    resolver 127.0.0.11 valid=10s;
+    proxy_pass http://backend:8000/api/bot-preview$request_uri;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+}
+```
+`$request_uri` always holds the original client URI untouched by the internal rewrite, so the
+real path/query reaches the backend with no regex-capture juggling. `frontend` and `backend`
+are already on the same default Compose network (`frontend` already `depends_on: backend`),
+so `backend:8000` needs no new networking — just DNS, which is the gotcha below.
+
+New Laravel side: `GET /api/bot-preview/{path?}` (public section of `routes/api.php`, a new
+`App\Http\Controllers\Api\BotPreviewController` — deliberately **not** under `Api/My`, to
+keep the public/private controller split intact). It parses the captured path; if it matches
+`blog/{slug}`, looks the post up via `BlogPost::query()->published()->where('slug', $slug)`
+— the exact same `scopePublished()` guard `BlogPostController@show` already uses, so a bot
+can never see a draft/unpublished post's title or description. Anything else (homepage,
+`/notes`, `/about`, an unknown slug) falls through to `SiteSettings::current()`'s defaults.
+Renders one new Blade view (`resources/views/bot-preview.blade.php`) — a bare `<head>`, no
+app shell, no business logic beyond what the controller already resolved. Chose Blade over a
+hand-built HTML string specifically because this project's own established standard (JSON
+formatter / JWT decoder sessions) is that XSS-safety must be *structural*, not a per-call
+habit — Blade's `{{ }}` auto-escapes unconditionally, so a future field added to this view
+can't accidentally skip escaping the way a string-concatenation approach could. Verified this
+isn't just theoretical: injected `<script>alert(1)</script>` as a post's `meta_title` and
+confirmed the raw bot-preview HTTP response contains the escaped `&lt;script&gt;`, never the
+literal tag.
+
+This stays a narrow exception, not a general SSR mode: one route, one controller, one view,
+reachable only via the nginx UA match (though also safe to hit directly — it's public,
+read-only, and exposes strictly a subset of what `/api/blog-posts/{slug}` already exposes for
+a published post).
+
+### Gotcha: `proxy_pass` with a variable needs an explicit `resolver` in Docker
+
+First version of the dispatch location omitted the `resolver 127.0.0.11 valid=10s;` line.
+Because the `proxy_pass` target includes a variable (`$request_uri`), nginx resolves the
+hostname *at request time* rather than once at config load — and request-time resolution does
+**not** fall back to `/etc/resolv.conf`; it silently needs an explicit `resolver` directive.
+Without it, every single bot request 502'd, with `no resolver defined to resolve backend` in
+nginx's error log. `127.0.0.11` is Docker's embedded DNS on every user-defined bridge network.
+
+**This was caught locally, before ever touching production** — built `frontend/Dockerfile.prod`
+into a real image, ran it as a bare container attached to the existing dev Compose network
+(so `backend:8000` resolved to the already-running dev backend container via Docker's
+service-name DNS), and curled it with both real and spoofed User-Agents. Real browser UAs
+(including a full SPA-fallback route, `/blog/some-post`) returned the identical `200`
++ `index.html` as before the nginx change, at every step of this work. Bot UAs 502'd until
+the `resolver` line was added, then returned correct populated `og:*`/`twitter:*` HTML — this
+whole class of bug (a change that would have silently broken every crawler request in
+production, with real browser traffic completely unaffected the entire time — exactly the
+kind of regression that could ship unnoticed for weeks) was never anywhere near production.
+Also caught the same way: `proxy_set_header Host $host;` needed to be `$http_host` instead —
+`$host` silently drops a non-standard port (irrelevant on the real https:// domain, but
+provably correct is provably correct), and `X-Forwarded-Proto` needed to forward
+`$http_x_forwarded_proto` (what Traefik already set on its way *in* to this container), not
+nginx's own `$scheme` (always `http` here — Traefik terminates TLS and speaks plain HTTP to
+this container internally) — the latter would have quietly built `http://` canonical/`og:url`
+values on an `https://` site.
+
+### Favicon generation without Imagick: a hand-built PNG-in-ICO container
+
+This project's only image driver is GD (`intervention/image`, no Imagick) — GD cannot decode
+or encode true `.ico` format at all. Rather than add a new dependency for one feature,
+`SiteAssetUploadService::storeFavicon()` hand-builds a minimal single-image ICO container
+(valid since Windows Vista, supported by every current browser): a 6-byte `ICONDIR` header +
+a 16-byte `ICONDIRENTRY` + a PNG payload, all from GD's own re-encoded output — never from
+the raw upload bytes, preserving this codebase's existing "re-encoding is a security control"
+principle (see `ImageUploadService`). Produces two files per upload (matches "standard .ico
+plus one PNG size" from the brief): a 32×32 PNG embedded in the `.ico`, and a separate
+standalone 512×512 `favicon.png`. Verified for real, not just by code inspection — downloaded
+the generated files and ran them through `file(1)`: `favicon.ico` reports "MS Windows icon
+resource - 1 icon, 32x32 with PNG image data", `favicon.png` reports a genuine 512×512 PNG.
+
+### OG images: JPEG, not this project's usual WebP — a deliberate, documented deviation
+
+`ImageUploadService` (cover images) always re-encodes to WebP. OG images (both the site-wide
+default and per-post overrides) instead re-encode to **JPEG, `cover(1200, 630)`, quality
+80** — Facebook/Twitter/LinkedIn's link-preview fetchers have a real history of inconsistent
+WebP support, and a link-preview image that silently fails to render defeats the entire
+point of this feature. Verified the actual output file, not just the code path: downloaded a
+generated OG image and confirmed via `file(1)` it's a genuine JPEG at exactly 1200×630.
+
+### New infrastructure this feature required (three firsts for this repo)
+
+1. **`storage:link` had never been run.** `backend/public/storage` didn't exist before this
+   change — the `public` disk and its `links` config in `filesystems.php` were already
+   correct, just never exercised. Running `artisan storage:link` a second time errors unless
+   `--force`'d, so `deploy.sh` gained an idempotent guard (`test -L public/storage` first),
+   right after `up -d --build` and before the migration check, so the symlink exists before
+   anything could hit `/storage/*`:
+   ```bash
+   if ./scripts/prod-compose.sh exec -T backend test -L public/storage; then
+     echo "storage:link already present — skipping"
+   else
+     ./scripts/prod-compose.sh exec -T backend php artisan storage:link
+   fi
+   ```
+2. **Nothing under `storage/app/public` would have survived a redeploy.** `docker-compose.prod.yml`'s
+   `backend` service has no bind mount (code is baked into the image at build time) and only
+   `backend_logs` was a named volume before this change — any uploaded favicon/OG image would
+   have been silently wiped by the next `docker compose up -d --build`. Added
+   `backend_public_storage:/var/www/html/storage/app/public`, mirroring the existing
+   `backend_logs` volume's exact reasoning.
+3. **Traefik never routed anything but `/api` to the backend.** The `public` disk's URL
+   helper builds URLs as `APP_URL/storage/...`, but the backend's Traefik router only matched
+   `PathPrefix(/api)` — `/storage/*` would have fallen through to the frontend's catch-all
+   router and 404'd there (no such files exist in the SPA's static build). Fixed by
+   *extending* the existing backend router's rule rather than adding a second router:
+   ```
+   Host(`${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/storage`))
+   ```
+   Deliberately not a new router — this repo already logged a real incident (2026-08-27ish,
+   see the header-hardening entries above) where an unpinned auto-computed priority silently
+   beat a pinned one; reusing the same router keeps the existing pinned `priority=100` in
+   force with nothing new to reason about.
+
+### `resources/views` and Blade, for the first time in this app
+
+`backend/resources/` didn't exist before this session — this has been a genuinely API-only
+Laravel app. One Blade view was added (see above) specifically because Blade's escaping
+guarantee is structurally stronger than a hand-rolled string for this one bot-facing HTML
+response. `config/view.php`'s defaults (compiled-view cache under
+`storage/framework/views`) needed no changes — Blade compiled and rendered correctly the
+first time it was exercised, in dev, with no additional setup.
+
+### Verification
+
+**By Claude Code, this session:**
+- `php -l` on every new/changed PHP file, and `php artisan route:list --path=api`: all new
+  routes registered, no fatal errors.
+- Ran the two new migrations in dev; `site_settings` singleton lazily created correctly via
+  `firstOrCreate` on first read.
+- **Local nginx bot-dispatch test against a real prod-built image** (see the resolver gotcha
+  above) — real browser UAs on both `/` and a deep SPA route (`/blog/some-post`) unaffected;
+  `facebookexternalhit`/`Twitterbot` on both the homepage and a real blog post returned
+  populated, correct `og:*`/`twitter:*` tags; the internal-only dispatch location correctly
+  404'd on direct external access (`internal;` working as intended).
+- **Override vs. fallback**: one post given `meta_title`/`meta_description` overrides, a
+  second left unset — confirmed both the bot-preview HTML and the public `/api/blog-posts/{slug}`
+  JSON (`og_image_url`, an appended Eloquent accessor) differ correctly per post, and that
+  deleting a per-post OG image override correctly falls back to the site-wide default again.
+- **Real end-to-end upload test** against the dev API (login → multipart upload →
+  `/my/settings/favicon` and `/my/settings/og-image`) — downloaded and `file(1)`-verified the
+  resulting `.ico`/`.png`/`.jpg` as described above, confirmed `/api/site-settings` reflects
+  the new URLs immediately.
+- **XSS structural check**: see the Blade section above — confirmed via the raw HTTP response,
+  not a code read-through.
+- **Real headless-Chromium pass via Playwright**: logged in, opened `/my/settings`, filled in
+  and saved site title/description/Twitter handle, reloaded and confirmed persistence;
+  opened `BlogForm`'s SEO disclosure, confirmed it pre-fills from the post's existing
+  overrides, edited and saved, confirmed the change round-tripped through the API.
+- **Caught and fixed a real bug this same way**: `Layout`'s site-wide `<Helmet>` was
+  originally gated on `settings` being loaded (`{settings && <Helmet>...}`). Since
+  `react-helmet-async`'s "deeper wins" merge order is actually "whichever instance *mounted*
+  later wins," and both `Layout`'s settings fetch and `BlogDetail`'s post fetch are
+  independent async calls, gating `Layout`'s `<Helmet>` on its own fetch meant it could mount
+  — and incorrectly win — *after* a page's more specific `<Helmet>`, whenever `Layout`'s fetch
+  happened to resolve second. Caught by literally checking `document.title` on a real post
+  page in a real browser and seeing the site-wide default instead of the post's title. Fixed
+  by rendering `Layout`'s `<Helmet>` unconditionally (with `settings?.field ?? fallback`
+  everywhere), so it always mounts before `Outlet`'s children exist, guaranteeing correct
+  override order regardless of fetch timing. Reran the same browser check three times after
+  the fix to rule out having just gotten lucky on timing.
+
+### Deploy
+
+Committed as `feat: add website settings + bot-only social preview rendering` (`36517bf`),
+gitleaks pre-commit hook ran clean, pushed to `main`. GitHub Actions "Deploy to Production"
+run completed with `success`. **Confirmed on live production**:
+- Spoofed-UA `curl` (`facebookexternalhit/1.1` on the homepage, `Twitterbot/1.0` on a real
+  published post) both returned correct, populated bot-preview HTML — including a correct
+  `https://` canonical/`og:url` (confirming the `X-Forwarded-Proto` fix works through the
+  real Traefik hop, not just the local test).
+- A real browser UA on the same post URL still returns the normal SPA shell, unaffected.
+- `/api/site-settings` returns the lazily-created singleton (migrations ran cleanly in prod).
+- `GET /storage/<nonexistent-file>` returns a genuine `404` from the backend (not a `200`
+  SPA-fallback from the frontend's catch-all router) — confirms the Traefik `/storage`
+  routing extension is live in production, not just locally.
+- GitHub Actions deploying with `set -euo pipefail` in `deploy.sh` reporting overall
+  `success` is strong indirect confirmation the new idempotent `storage:link` step also
+  succeeded (a failed `artisan storage:link` would have aborted the whole script).
+- **Not yet done as of this entry, by the user's own choice**: actually uploading a favicon/
+  OG image through the live `/my/settings` dashboard and confirming it takes effect with no
+  redeploy. Everything upstream of that (the volume, the symlink, the Traefik rule, the
+  upload endpoints themselves) is verified working end-to-end in dev against the identical
+  code path — this is the one piece intentionally left for a manual pass against the real
+  production login rather than sharing/using real credentials in this session.
