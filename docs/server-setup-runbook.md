@@ -3241,3 +3241,146 @@ cost/attack-surface impact: see the completion report in the conversation this s
 part of — all confirmed no-impact except the two new MIT-licensed packages
 (`remark-directive`, plus `unist-util-visit` promoted from an already-present transitive
 dependency to a direct one).
+
+## 2026-09-15 — Tools Module: Multi-Timezone Meeting Scheduler
+
+Sixth tool in `/tools`: a client-side meeting-time scheduler at `/tools/timezone-scheduler`,
+built for a live demo to a Virtual Assistants workshop on Oct 10. Same registration pattern
+as the other five (`tools/registry.ts` entry + route in `App.tsx`). Entirely frontend — all
+timezone conversion and DST handling done via `Intl.DateTimeFormat`/`formatToParts`, no
+external API, no new npm dependency. A curated 181-city list (`data/timezoneCities.ts`)
+backs substring search; `Intl.supportedValuesOf('timeZone')` (feature-detected) backs a
+secondary "browse all time zones" fallback grouped by continent.
+
+This session picked up work that had already been drafted (all three files — `lib/
+timezones.ts`, `data/timezoneCities.ts`, `pages/TimezoneScheduler.tsx` — existed
+uncommitted on disk from a prior session) and took it from "written" to "verified and
+shipped." That gap mattered: the draft looked complete on read-through, but actually
+running it surfaced a crash and a design-intent bug that a code read alone would not have
+caught.
+
+### Bug found only by actually running it: missing `year` crashed every load
+
+`lib/timezones.ts`'s `getDisplayFormatter()` built its `Intl.DateTimeFormat` options
+without `year: 'numeric'`. `getZonedParts()` reads `map.year` from `formatToParts()`
+output and does `Number(map.year)` — with no `year` part requested, that's `Number(undefined)`
+= `NaN`. `NaN` flows into `Date.UTC(...)` inside `buildWindow()`/`zonedTimeToUtc()`,
+producing an Invalid Date, and `Intl.DateTimeFormat.formatToParts()` on an Invalid Date
+throws `RangeError: Invalid time value` — uncaught, so the entire page crashed on mount,
+every time, for every user. `tsc` had nothing to say about this (the field is typed
+`number`, and `Number(undefined)` type-checks fine while being wrong at runtime); it only
+showed up once the component actually rendered in a real browser. Fixed by adding
+`year: 'numeric'` to the formatter options.
+
+### Design-intent bug: the empty-state quick-add chips were effectively unreachable
+
+The plan calls for an inviting empty state (hint text + quick-add chips) specifically "so
+the demo never opens on a blank search box." The draft gated that state on `!referenceZone`
+— but `referenceZone` defaults to the browser's own timezone via `getBrowserTimeZone()`,
+which is non-null on essentially every real load. So the invite state was reachable only in
+the near-impossible case of `Intl` throwing on `resolvedOptions().timeZone`, and a normal
+page load instead showed one lone reference-zone row with no invitation to add anything —
+exactly the flat, un-demo-ready opening the plan was written to avoid. Re-gated the invite
+block on `zones.length === 0` (no *comparison* zones added yet) instead, rendered alongside
+the reference row rather than replacing it, and filtered the quick-add chips to exclude
+whichever demo zone already matches the auto-detected reference (so a chip is never a dead
+click). Confirmed visually afterward: the reference row and the "+ US Pacific / + UK" chips
+now render together on first load, and the chips correctly disappear once a comparison zone
+is added.
+
+### Day-diff badge, working-hours color, and DST handling — actually exercised, not assumed
+
+- **Midnight-crossing sweep**: drove the live page with Playwright (see Verification) with
+  Manila (auto-detected container reference), Los Angeles, and London all added, stepping
+  the 48h/15-min slider hour-by-hour across the full window. Spot-checked the +1/-1 day
+  badge against hand-computed UTC offsets at several boundaries (e.g. reference-zone
+  midnight = Manila 00:00 GMT+8 = UTC 16:00 previous day → LA 09:00 PDT previous day → `-1d`
+  badge, matching); confirmed the badge appears/disappears exactly at each zone's own local
+  midnight, independently per zone, not synchronized to the reference's midnight.
+- **Working-hours thresholds**: confirmed the green/amber/red state flips exactly at the
+  documented boundaries (9:00 AM → green, 8:59 AM → amber, 6:59 PM → green, 7:00 PM → amber,
+  8:59 PM → amber, 9:00 PM → red), i.e. the boundaries are correctly half-open (`>=`/`<`), not
+  off-by-one.
+- **DST, both directions, via a real mocked system clock (not assumed from Intl's
+  reputation)**: used Playwright's `context.clock.install()` to pin the browser's system
+  time to noon UTC on two 2026 US transition dates, so the app's own `new Date()` anchor
+  landed the 48h window on the transition night, then stepped the slider through it:
+  - **Fall-back (Nov 1, 2026)**: America/Los_Angeles correctly folds — `1:45 AM (PDT)` is
+    immediately followed by `1:00 AM (PST)` at the next slider step, i.e. the ambiguous
+    1:00–1:59 AM hour is shown twice with the correct abbreviation each time. Same night,
+    America/New_York (also a fall-back zone) independently folds `1:45 AM EDT` → `1:00 AM
+    EST` at its own correct offset from the reference.
+  - **Spring-forward (Mar 8, 2026)**: America/Los_Angeles correctly skips the gap —
+    `1:45 AM (PST)` is immediately followed by `3:00 AM (PDT)` at the next slider step; the
+    2:00–2:59 AM hour that never occurred is simply absent from the sequence.
+  - Zero console/page errors in either scenario.
+
+### Gotcha: three layers of path/tooling friction before any of this could be tested
+
+This machine runs Claude Code on the Windows side, addressing the repo through
+`\\wsl.localhost\Ubuntu\...`. In order:
+1. **Windows `npm`/`tsc`/`vite` over the UNC path**: same wall as the 2026-09-07 JWT decoder
+   session (`cmd.exe` refuses a UNC working directory; `npm install` additionally hit
+   `EPERM` creating `node_modules/@scope` dirs over the network filesystem).
+2. **`docker compose` invoked from the Windows-side shell resolved bind-mount sources
+   wrong**: `docker compose config` showed the `frontend` build context as the literal
+   `\\wsl.localhost\...` UNC string, and starting the container with that context produced
+   `ENOENT: /app/package.json` inside the container — the Windows Docker CLI couldn't
+   translate the UNC path into the WSL2 VM's native filesystem for the bind mount. Fixed by
+   invoking `docker compose` from *inside* the WSL Ubuntu distro (`wsl.exe -d Ubuntu -- bash
+   -lc "cd /home/andrew/projects/devnotes && docker compose ..."`), where the same compose
+   file resolves the context to the correct native `/home/andrew/...` path.
+3. Once the frontend container was actually up, `npx tsc -b` and `npm run build`/`npm run
+   lint` all ran clean inside it, same working pattern as the JWT decoder session.
+
+Worth a future session reading this before assuming "no browser tooling available" —
+`chromium-cli` wasn't installed, but a scratch `npm install playwright` (in a plain Windows
+temp path, not the UNC one) plus `npx playwright install chromium` worked fine and is what
+actually caught the crash bug above. A code read-through alone would have shipped a
+broken page.
+
+### Verification
+
+**By Claude Code, this session:**
+- `npx tsc -b` (inside the `frontend` container, native WSL path): clean, no errors, both
+  before and after the two fixes above.
+- `npm run build`: clean production build, 294 modules, no errors.
+- `npm run lint` (`oxlint`): 0 errors, same 2 pre-existing `AuthContext`/`ThemeContext`
+  fast-refresh warnings prior sessions have noted, nothing new from this feature.
+- **Real headless-Chromium pass via Playwright** (not just a code read): loaded the live dev
+  page, added US Pacific/UK/Philippines-equivalent zones, swept the full 48h slider in
+  1-hour steps logging every row, and screenshotted the empty state, a populated state, a
+  midnight-crossing frame, and the copy-all confirmation. This is what caught both bugs
+  described above — the page crashed outright on the very first load attempt.
+- **DST fall-back and spring-forward**, both verified with a mocked system clock as
+  described above, not "Intl handles this" taken on faith.
+- **Dark mode**: toggled the existing theme switch and screenshotted the populated state —
+  renders correctly against the same `paper`/`ink`/`rule`/`keyword`/`string`/`flag` tokens
+  as light mode, no unstyled/illegible regions.
+- **Clipboard**: "copy all" and per-zone "copy" both exercised against a real
+  `navigator.clipboard.writeText` call (granted `clipboard-write` permission in the test
+  browser context) and produced the "copied!" confirmation state.
+
+### Deploy
+
+Committed as `feat: add multi-timezone meeting scheduler tool` (`22e5e4e`), gitleaks
+pre-commit hook ran clean (0 leaks), pushed to `main`. GitHub Actions "Deploy to Production"
+run completed with `success` (polled via the REST API rather than `gh`, which isn't
+installed in this session's shell). **Confirmed on live production**:
+`https://devnotes.billandrewsallao.com/tools/timezone-scheduler` returns `200` and renders
+via a real headless-browser pass (no console/page errors); the deployed JS bundle was
+fetched directly and grepped for the `timezone-scheduler` route string, the "Timezone
+Scheduler" title copy, and the "working hours" status copy — all present, confirming this
+isn't a stale cache serving the previous build.
+
+**Standing verification checklist** (per `CLAUDE.md`):
+1. **New dependencies**: none. `frontend/package.json`/`package-lock.json` unchanged by
+   this commit — confirmed via `git diff --cached --stat` before committing.
+2. **Cost/infra impact**: none. Fully client-side; no new API endpoint, container,
+   background job, or outbound API call. No change to the fixed $6/mo Droplet's footprint.
+3. **New attack surface**: the only user input is the zone-search text field and the
+   date/time slider, both purely client-side state. All rendered text (city labels, times,
+   zone IDs) goes through JSX text interpolation — no `dangerouslySetInnerHTML` anywhere in
+   this feature, no raw SQL (no backend involvement at all), no `eval`/`new Function`, and
+   no new unauthenticated write path (there's nothing to write — `localStorage`/server state
+   are both untouched by this feature).
