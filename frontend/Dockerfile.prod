@@ -17,6 +17,26 @@ COPY . .
 ARG VITE_API_URL
 ENV VITE_API_URL=$VITE_API_URL
 
+# Absolute, public base URL the "prebuild" hook (scripts/inject-meta.mjs)
+# fetches SiteSettings from to bake static OG/meta tags into index.html.
+# Deliberately separate from VITE_API_URL: that one is intentionally
+# relative (/api) in production for same-origin browser requests, which
+# can't be fetched from here — this build stage has no browser origin.
+# Left unset for any build that doesn't pass it (local dev) — the script
+# no-ops in that case.
+ARG SITE_BASE_URL
+ENV SITE_BASE_URL=$SITE_BASE_URL
+
+# Forces this layer (and the prebuild fetch inside it) to actually re-run on
+# every deploy. Without this, Docker's layer cache sees an unchanged
+# COPY . . input (a settings-only edit via /my/settings touches the
+# database, not any file in this build context) and reuses the previous
+# `npm run build` layer verbatim — silently keeping stale baked-in meta
+# tags forever, never re-fetching SiteSettings. deploy.sh passes the new
+# commit SHA here, which changes on every deploy (including a no-code-change
+# empty commit used solely to refresh the bake).
+ARG CACHEBUST=0
+
 RUN npm run build
 
 # ---- Stage 2: serve statically ----

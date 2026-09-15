@@ -136,6 +136,17 @@ services:
         # environment: value here would do nothing, there's no Node process
         # left at runtime to read it.
         VITE_API_URL: ${VITE_API_URL}
+        # Absolute production URL for the "prebuild" static-meta-tag
+        # injection step (frontend/scripts/inject-meta.mjs) to fetch
+        # SiteSettings from during the image build — reuses DOMAIN, already
+        # defined in .env.production for Traefik's routing rule below, so
+        # this needs no new .env entry.
+        SITE_BASE_URL: https://${DOMAIN}
+        # Cache-buster: forces the build layer that fetches SiteSettings to
+        # actually re-run every deploy instead of Docker reusing a stale
+        # cached `npm run build` layer (see Dockerfile.prod). deploy.sh
+        # exports this as the new commit SHA before calling `up --build`.
+        CACHEBUST: ${CACHEBUST}
     restart: unless-stopped
     depends_on:
       - backend

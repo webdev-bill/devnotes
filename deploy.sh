@@ -9,6 +9,14 @@ NEW_SHA=$(git rev-parse HEAD)
 
 echo "Deploying $OLD_SHA -> $NEW_SHA"
 
+# Forces the frontend build's site-settings bake (see Dockerfile.prod,
+# scripts/inject-meta.mjs) to actually re-fetch on every deploy, even one
+# triggered by an empty commit specifically to refresh stale baked-in meta
+# tags after a /my/settings-only change — otherwise Docker's layer cache
+# would silently reuse the previous build's fetch since nothing in the
+# frontend build context itself changed.
+export CACHEBUST="$NEW_SHA"
+
 ./scripts/prod-compose.sh up -d --build
 
 # Idempotent — `storage:link` errors if the link already exists, so this

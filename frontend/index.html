@@ -11,6 +11,17 @@
       rel="stylesheet"
     />
     <title>devnotes</title>
+    <!-- STATIC_META_TAGS_START -->
+    <!-- Injected at production build time by scripts/inject-meta.mjs from
+         SiteSettings, so a headless-Chrome-based checker tool (a completely
+         standard browser UA — no UA heuristic can catch it, see
+         docs/server-setup-runbook.md) still sees correct site-wide OG/meta
+         tags on the very first byte, with no client-side JS required. Only
+         a build-time bake, not per-request: stays empty here in the
+         source template and in any build that doesn't set SITE_BASE_URL
+         (local dev). Per-post overrides are NOT baked in here — those still
+         only reach named social crawlers via the existing bot-preview path. -->
+    <!-- STATIC_META_TAGS_END -->
     <script>
       // Runs before React mounts so there's no flash of the wrong theme on
       // load. Same storage key and resolution order as ThemeContext — keep
