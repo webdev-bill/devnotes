@@ -29,4 +29,10 @@ export const tools: ToolManifestEntry[] = [
     description:
       'Decode a JWT header and payload, entirely in your browser. Decodes only — does not verify the signature.',
   },
+  {
+    slug: 'timezone-scheduler',
+    name: 'Timezone Scheduler',
+    description:
+      'Compare meeting times across cities and timezones, with working-hours and day-offset indicators, entirely in your browser.',
+  },
 ]

@@ -10,6 +10,7 @@ import JsonFormatter from './pages/JsonFormatter'
 import JwtDecoder from './pages/JwtDecoder'
 import Login from './pages/Login'
 import QrCodeGenerator from './pages/QrCodeGenerator'
+import TimezoneScheduler from './pages/TimezoneScheduler'
 import BlogDashboard from './pages/my/BlogDashboard'
 import BlogForm from './pages/my/BlogForm'
 import NoteForm from './pages/my/NoteForm'
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="tools/qr-code-generator" element={<QrCodeGenerator />} />
         <Route path="tools/json-formatter" element={<JsonFormatter />} />
         <Route path="tools/jwt-decoder" element={<JwtDecoder />} />
+        <Route path="tools/timezone-scheduler" element={<TimezoneScheduler />} />
         <Route path="about" element={<About />} />
         <Route path="login" element={<Login />} />
 
