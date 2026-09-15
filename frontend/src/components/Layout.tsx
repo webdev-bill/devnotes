@@ -1,9 +1,36 @@
+import { Helmet } from 'react-helmet-async'
 import { Link, Outlet } from 'react-router'
+import { useSiteSettings } from '../context/useSiteSettings'
 import Nav from './Nav'
 
 export default function Layout() {
+  const { settings } = useSiteSettings()
+
   return (
     <div className="min-h-screen bg-paper">
+      {/* Site-wide defaults — rendered on every route so a page with no
+          page-specific <Helmet> (e.g. Home, NotesList) still gets sane
+          title/meta/favicon tags. A route that renders its own <Helmet>
+          (e.g. BlogDetail) has its tags merged over these by react-helmet-async,
+          not replaced wholesale — deeper-in-the-tree wins per tag.
+
+          Deliberately UNCONDITIONAL (not gated on `settings` being loaded):
+          react-helmet-async's "deeper wins" ordering is really "whichever
+          Helmet instance mounted later wins," and both this Helmet and a
+          child page's Helmet mount behind their own independent async
+          fetches. If this one were gated on `settings &&`, it could mount
+          — and "win" — AFTER a page-specific Helmet whenever the page's own
+          fetch happens to resolve first, silently clobbering a more
+          specific title with the site default. Rendering unconditionally
+          means this Helmet always mounts on Layout's first render, before
+          Outlet's children exist at all, so a child's Helmet always mounts
+          later and correctly wins regardless of fetch timing. */}
+      <Helmet>
+        <title>{settings?.site_title ?? 'devnotes'}</title>
+        {settings?.meta_description && <meta name="description" content={settings.meta_description} />}
+        {settings?.favicon_ico_url && <link rel="icon" href={settings.favicon_ico_url} />}
+        {settings?.favicon_png_url && <link rel="icon" type="image/png" href={settings.favicon_png_url} />}
+      </Helmet>
       <div className="mx-auto max-w-6xl px-4 pt-8 sm:px-6">
         {/* Nav (tab tray) and main (content) share this one box so the active
             tab's background can meet the content's background with zero gap —

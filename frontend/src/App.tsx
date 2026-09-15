@@ -15,6 +15,7 @@ import BlogDashboard from './pages/my/BlogDashboard'
 import BlogForm from './pages/my/BlogForm'
 import NoteForm from './pages/my/NoteForm'
 import NotesDashboard from './pages/my/NotesDashboard'
+import SiteSettingsPage from './pages/my/SiteSettings'
 import NoteDetail from './pages/NoteDetail'
 import NotesList from './pages/NotesList'
 import ToolsLanding from './pages/ToolsLanding'
@@ -44,6 +45,7 @@ export default function App() {
           <Route path="my/blog" element={<BlogDashboard />} />
           <Route path="my/blog/new" element={<BlogForm />} />
           <Route path="my/blog/:slug/edit" element={<BlogForm />} />
+          <Route path="my/settings" element={<SiteSettingsPage />} />
         </Route>
       </Route>
     </Routes>

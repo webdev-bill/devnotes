@@ -89,6 +89,10 @@ services:
       # `up -d --build`/`--force-recreate` (i.e. every deploy) silently wipes
       # storage/logs/laravel.log along with the rest of the old container.
       - backend_logs:/var/www/html/storage/logs
+      # Same reasoning, for the `public` disk (favicon, OG images uploaded
+      # via /my/settings) — without this, an upload would only survive until
+      # the next deploy recreates the container from a fresh image layer.
+      - backend_public_storage:/var/www/html/storage/app/public
     depends_on:
       db:
         condition: service_healthy
@@ -96,7 +100,15 @@ services:
     # Compose network.
     labels:
       - traefik.enable=true
-      - traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && PathPrefix(`/api`)
+      # Extended (not a new router) to also match /storage — the `public`
+      # disk's URL helper builds URLs as APP_URL/storage/..., which need to
+      # reach this container's nginx (backend/docker/nginx.conf serves the
+      # storage:link symlink as a plain static file). Reusing this router's
+      # existing pinned priority=100 avoids reintroducing the exact
+      # unpinned-vs-pinned priority bug already logged in
+      # docs/server-setup-runbook.md — a second router here would need its
+      # own priority to reason about instead.
+      - traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/storage`))
       # Explicit priority on BOTH routers (see frontend below), not just this
       # one — Traefik uses higher-number-wins, and mixing one explicit value
       # with the other router's auto-computed (rule-string-length-based)
@@ -158,3 +170,4 @@ volumes:
   db_data:
   traefik_certs:
   backend_logs:
+  backend_public_storage:

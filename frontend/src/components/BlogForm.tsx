@@ -4,6 +4,7 @@ import { deleteBlogPostCoverImage, imagePath, uploadBlogPostCoverImage } from '.
 import type { BlogPost, BlogPostPayload, Image } from '../api/types'
 import { inputClass, labelClass } from './formStyles'
 import LineNumberedTextarea from './LineNumberedTextarea'
+import SeoFieldsSection from './SeoFieldsSection'
 import { getPostStatus, postStatusStyle } from '../lib/postStatus'
 
 type BlogFormProps = {
@@ -39,6 +40,8 @@ const primaryButtonBusyLabel: Record<'draft' | 'scheduled' | 'published', string
 export default function BlogForm({ initialPost, onSubmit }: BlogFormProps) {
   const [title, setTitle] = useState(initialPost?.title ?? '')
   const [content, setContent] = useState(initialPost?.content ?? '')
+  const [metaTitle, setMetaTitle] = useState(initialPost?.meta_title ?? '')
+  const [metaDescription, setMetaDescription] = useState(initialPost?.meta_description ?? '')
   const [publishedAtInput, setPublishedAtInput] = useState(
     initialPost?.published_at ? toDatetimeLocalValue(initialPost.published_at) : '',
   )
@@ -100,7 +103,13 @@ export default function BlogForm({ initialPost, onSubmit }: BlogFormProps) {
     setError(null)
     setSubmitting(true)
     try {
-      await onSubmit({ title, content, published_at: publishedAt })
+      await onSubmit({
+        title,
+        content,
+        published_at: publishedAt,
+        meta_title: metaTitle || null,
+        meta_description: metaDescription || null,
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong. Please try again.')
       setSubmitting(false)
@@ -211,6 +220,14 @@ export default function BlogForm({ initialPost, onSubmit }: BlogFormProps) {
           {statusLabel}
         </p>
       </div>
+
+      <SeoFieldsSection
+        initialPost={initialPost}
+        metaTitle={metaTitle}
+        metaDescription={metaDescription}
+        onMetaTitleChange={setMetaTitle}
+        onMetaDescriptionChange={setMetaDescription}
+      />
 
       {error && (
         <p className="rounded-md border border-flag/30 bg-flag/5 px-3 py-2 font-body text-sm text-ink">

@@ -30,6 +30,8 @@ class StoreBlogPostRequest extends FormRequest
             'content' => ['required', 'string'],
             // Omit or null to save as a draft; a past or future date publishes/schedules it.
             'published_at' => ['nullable', 'date'],
+            'meta_title' => ['nullable', 'string', 'max:255'],
+            'meta_description' => ['nullable', 'string', 'max:500'],
         ];
     }
 }

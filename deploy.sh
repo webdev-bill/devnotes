@@ -11,6 +11,18 @@ echo "Deploying $OLD_SHA -> $NEW_SHA"
 
 ./scripts/prod-compose.sh up -d --build
 
+# Idempotent — `storage:link` errors if the link already exists, so this
+# only actually runs artisan the first time it's ever missing (a fresh
+# server, or a volume that somehow got wiped). Must happen before anything
+# could hit /storage/*, so it runs right after `up -d --build`, before the
+# migration check below.
+echo "Ensuring storage symlink exists..."
+if ./scripts/prod-compose.sh exec -T backend test -L public/storage; then
+  echo "storage:link already present — skipping"
+else
+  ./scripts/prod-compose.sh exec -T backend php artisan storage:link
+fi
+
 # Path corrected to where migrations actually live in this repo
 # (backend/database/migrations) — the original database/migrations would
 # never match anything here, silently skipping the migrate step every time.

@@ -171,17 +171,33 @@ export default function Nav() {
           group (shouldn't be able to scroll out of view on a narrow
           viewport) and given their own centered alignment/spacing rather
           than reusing the tabs' tab-to-tab gap-1. Not styled as tabs either
-          — same reasoning as always: neither is a page. */}
+          — same reasoning as always: neither is a page. Settings lives here
+          rather than as a third `lg:flex` tab (or exclusively in the
+          `MyWorkspaceTab` dropdown, which is itself `lg:hidden`) — a tab
+          there would either reintroduce the exact overflow the dropdown
+          collapse was built to fix, or be unreachable at `lg`+ altogether.
+          Settings is used far less often than notes/blog, closer in
+          frequency to "log out" than to a primary content tab. */}
       <div className="mb-2 flex shrink-0 items-center gap-4">
         <ThemeToggle />
         {isAuthenticated && (
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="font-display text-xs text-ink/45 hover:text-flag"
-          >
-            log out
-          </button>
+          <>
+            <NavLink
+              to="/my/settings"
+              className={({ isActive }) =>
+                `font-display text-xs ${isActive ? 'text-keyword' : 'text-ink/45 hover:text-keyword'}`
+              }
+            >
+              settings
+            </NavLink>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="font-display text-xs text-ink/45 hover:text-flag"
+            >
+              log out
+            </button>
+          </>
         )}
       </div>
     </div>

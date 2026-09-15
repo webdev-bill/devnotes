@@ -33,6 +33,8 @@ class UpdateBlogPostRequest extends FormRequest
             ],
             'content' => ['sometimes', 'required', 'string'],
             'published_at' => ['sometimes', 'nullable', 'date'],
+            'meta_title' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'meta_description' => ['sometimes', 'nullable', 'string', 'max:500'],
         ];
     }
 }
