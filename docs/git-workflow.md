@@ -1,7 +1,5 @@
 # Git Workflow — devnotes
 
-# Git Workflow — devnotes
-
 ## Branch
 
 - **`main`** — the only branch. Solo project, no team to protect from broken work-in-progress,
