@@ -17,6 +17,9 @@ services:
       # Named volume so database data survives `docker compose down`
       # (it's only destroyed by `docker compose down -v`).
       - db_data:/var/lib/postgresql/data
+      # Creates the devnotes_test database for the backend test suite —
+      # only runs on a fresh, empty volume (see the script for existing ones).
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${DB_PORT}:5432"
     healthcheck:

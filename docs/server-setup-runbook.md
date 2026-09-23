@@ -3983,3 +3983,262 @@ Not yet deployed as of this entry — pending final review before pushing. Files
   bot-preview session verified it (escaping a value containing `<`/`>`/`&`/`"` and
   confirming the raw output, not just reading the code). No new write path, no
   `dangerouslySetInnerHTML`, no `eval`.
+
+## 2026-09-23 — Automated Backend Test Suite (and the Discovery That Running Tests Was Wiping the Dev Database)
+
+Goal: turn the one-off curl verifications from the 2026-08-26/27 sessions (public/private
+separation, draft/scheduled posts, ownership policies, auth) into a permanent PHPUnit
+feature suite, so those guarantees can't regress silently and the upcoming hardening
+work (Sanctum token expiration, server-side "publish now") lands with tests already in
+place. Inspecting the existing setup came first, and it turned up something more
+important than the tests themselves.
+
+### The headline finding: `php artisan test` in the dev container ran against the dev database
+
+**What happened.** `backend/phpunit.xml` (Laravel's scaffold default) contained
+`<env name="DB_CONNECTION" value="sqlite"/>` and `<env name="DB_DATABASE" value=":memory:"/>`,
+which *looks* like "tests use a throwaway in-memory SQLite database." Inside the dev
+stack, it didn't. The first run of the existing suite this session failed every
+database-backed test with:
+
+```
+SQLSTATE[08006] [7] could not translate host name "db" to address: Name or service not known
+(Connection: pgsql, Host: db, Port: 5432, Database: devnotes, ...)
+```
+
+`db` wasn't running for that particular run, on purpose (it was a `run --rm --no-deps`
+container). That is the only reason this showed up as an error instead of quietly
+succeeding. `Connection: pgsql ... Database: devnotes` is the real dev database, not
+SQLite. `ImageUploadTest` uses `RefreshDatabase`, which starts by running
+`migrate:fresh` (drop every table, then re-migrate) on whatever database it's pointed
+at. So every time that suite ran with the stack up, it wiped local dev data.
+
+**Root cause, layer 1: a plain `<env>` never overrides a real environment variable.**
+PHPUnit only applies `<env name="X" value="...">` if `X` isn't already set in the
+process environment. `docker-compose.yml` sets `DB_CONNECTION=pgsql` and
+`DB_DATABASE=${DB_DATABASE}` on the backend container (deliberately, so the app always
+talks to the compose `db` service), so PHPUnit silently skipped both lines.
+
+**Root cause, layer 2: `force="true"` isn't enough either.** This turned up later in the
+same session, and the guard described below is what caught it. The standard fix is
+`<env name="DB_DATABASE" value="devnotes_test" force="true"/>`. With that applied,
+`php artisan test` aborted all 46 tests, and the new guard reported
+`database "devnotes"`: still the dev database. Reading `vendor/phpunit/.../PhpHandler.php`
+showed why. `force="true"` writes only to `putenv()` and `$_ENV`. Laravel's `env()` reads
+through phpdotenv's adapter chain, which checks **`$_SERVER` first**, and PHP CLI fills
+`$_SERVER` from the real process environment. So the container's `DB_DATABASE=devnotes`
+still won. The fix that actually works is PHPUnit's `<server>` element, which writes
+`$_SERVER` unconditionally:
+
+```xml
+<server name="DB_CONNECTION" value="pgsql"/>
+<server name="DB_DATABASE" value="devnotes_test"/>
+<server name="DB_URL" value=""/>
+```
+
+To state it plainly: the design proposal for this session said `force="true"` would fix
+this. That was wrong. It would have shipped wrong if the guard hadn't been written first
+and tested against the real runner.
+
+**Impact on local data.** `RefreshDatabase` first appeared in this repo on 2026-09-01
+(`ImageUploadTest`, across the three image-upload sessions). The earlier 2026-08-27 suite
+run only had Laravel's scaffold `ExampleTest`s, which don't touch the database. So
+**local dev data from before 2026-09-01 was very likely wiped by one of those runs.** If a
+test account or old notes are missing locally, that is the probable reason, not an app
+bug. It can't be proven now: a wiped database that has since been re-populated looks
+like any other. Production was never at risk. The prod image can't run tests at all (see
+below), and `docker-compose.prod.yml`'s database is on a different host.
+
+**How it's prevented now: a guard that runs before any trait.** `tests/TestCase.php`
+overrides `setUpTraits()` and throws unless the resolved database name ends in `_test`
+(or `_test_N`, for `--parallel`). Placement matters. Laravel's
+`setUpTheTestEnvironment()` calls `refreshApplication()`, then `setUpTraits()` (where
+`RefreshDatabase`'s `migrate:fresh` runs), and only *then* the `afterApplicationCreated`
+callbacks. A guard registered as an `afterApplicationCreated` callback, which looks like
+the natural place, would fire after the tables were already gone. `setUpTraits()` runs
+after the app has booted, so env, `.env` and any cached config are all applied and the
+value is final, but before any trait. `getDatabaseName()` only reads config and doesn't
+open a connection, so nothing reaches Postgres until the check passes. The guard also
+catches the cached-config case (after `php artisan config:cache`, Laravel ignores env
+entirely), which `phpunit.xml` alone can't.
+
+**Proof, not reasoning.** A temporary copy of `phpunit.xml` pointed at `devnotes` was run
+through the real runner (`php artisan test -c phpunit.guard-probe.xml
+tests/Feature/ImageUploadTest.php`), with a fingerprint of the dev database taken
+before and after:
+
+```
+BEFORE  users|notes|blog_posts|migrations = 1|0|4|12   migrations max(id)=12, user ids=19, post ids=5,6,7,9
+
+ FAILED  Tests\Feature\ImageUploadTest > valid jpeg note…  RuntimeException
+  Refusing to run tests against database "devnotes" (connection "pgsql"): its name does not
+  end in _test, and RefreshDatabase would drop every table in it. Check phpunit.xml
+  (DB_DATABASE must be a <server> entry, see the comment there) and run
+  `php artisan config:clear` if config is cached.
+  at tests/TestCase.php:30
+  (called from InteractsWithTestCaseLifecycle.php:106, i.e. setUpTraits(), before refreshDatabase())
+
+AFTER   users|notes|blog_posts|migrations = 1|0|4|12   migrations max(id)=12, user ids=19, post ids=5,6,7,9
+```
+
+The ids are what matter. `migrate:fresh` recreates the tables, which resets every
+sequence, so ids that survive prove no table was dropped and recreated. The probe config
+was deleted afterward.
+
+### Why Postgres, not SQLite in-memory
+
+Both `NoteController`s implement `?search=` with `ilike`, a Postgres-only operator. This
+was checked directly in the backend container rather than assumed:
+
+```
+select count(*) from t where x ilike '%hello%' => ERROR: SQLSTATE[HY000]: General error: 1 near "ilike": syntax error
+select count(*) from t where x like  '%hello%' => 1
+```
+
+So SQLite couldn't run the search tests at all without changing application code. The
+smaller mismatches point the same way. SQLite's `LIKE` ignores case where Postgres's
+doesn't, and SQLite stores timestamps as text and compares them as text, so the
+`published()` scope's `published_at <= now()` wouldn't be tested the way production
+evaluates it. Decision: a dedicated `devnotes_test` database in the existing dev `db`
+container (`postgres:16`, same as prod), with no new service. PHPUnit stays: it's already
+in use, and Pest would have added a dependency for no gain.
+
+### Setup
+
+- `docker/postgres-init/01-create-test-database.sql` (`CREATE DATABASE devnotes_test;`)
+  is mounted read-only into the dev `db` service at `/docker-entrypoint-initdb.d`. **The
+  postgres image only runs that directory when initialising an empty data volume.** An
+  existing volume ignores it. Both halves were verified. A throwaway `postgres:16`
+  container with a fresh anonymous volume came up with `devnotes_test` owned by
+  `POSTGRES_USER`. Recreating the real dev `db` container with the new mount left its data
+  untouched (same fingerprint as above) and logged zero init-script lines.
+- Existing volumes need a one-time `docker compose exec db sh -c 'createdb -U
+  "$POSTGRES_USER" devnotes_test'`. It was run this session against the local stack, and
+  it's also in `docs/git-workflow.md` → "Testing". `$POSTGRES_USER` is expanded inside the
+  container, so no credential ever has to be typed or read from `.env`.
+- Run: `docker compose exec backend php artisan test` (documented in
+  `docs/git-workflow.md`). 46 tests, 141 assertions, about 5s.
+- Deleted both scaffold `ExampleTest`s. The Feature one expected `GET /` → 200 in an app
+  with no web routes and had failed from the start (noted in the 2026-08-27 entry).
+  `tests/Unit/.gitkeep` keeps the `Unit` suite directory in a fresh clone.
+- New factories: `NoteFactory` (`public()`/`private()`, private by default),
+  `TagFactory`, and `BlogPostFactory` (`draft()`/`published()`/`scheduled()`, draft by
+  default). The defaults are deliberately the *least* visible state, so a test only gets
+  a public note or a live post by asking for one.
+
+### What the suite covers
+
+| File | Guarantees |
+|---|---|
+| `PublicNoteVisibilityTest` | `GET /api/notes` never returns a private note: unfiltered, with `?search=` (title *and* content matches), with `?tag=`, and with both combined. Search ignores case. `GET /api/notes/{id}` returns 404 for a private note, even to its owner |
+| `BlogPostPublicationTest` | Drafts and future-dated posts are left out of the list and return 404 on their slug. Past posts are listed and served. A scheduled post becomes public once its time passes (`travel()`) |
+| `OwnershipTest` | A second user gets 403 on view/update/delete of another user's note and blog post, and the record is unchanged afterward. `/api/my/*` index lists only the caller's records. `user_id` in the body is ignored on create and update, for both models |
+| `AuthTest` | Login returns a working token. Wrong password and unknown email both return the same 401 JSON. Logout revokes the current token, and only that one. Unauthenticated `/api/my/*` returns 401 JSON with no `Accept` header, with `Accept: */*` (curl), and with `Accept: application/json`. The login throttle returns 429 + `Retry-After` on the 6th attempt, blocks even the correct password, is keyed per email (a bystander on the same IP isn't locked out), and resets after the window |
+| `ImageUploadTest` (existing, unchanged) | Now actually runs on Postgres for the first time. All 16 pass |
+
+### Mutation check: do the tests actually fail when the guarantee breaks?
+
+A passing security test only counts as evidence if it would fail without the protection.
+Each guarantee was broken on purpose, one at a time, by editing the application file with
+`sed`. The relevant tests were run, then the file was restored with `git checkout`, and
+the working tree was confirmed clean after every step:
+
+| Injected regression | Result |
+|---|---|
+| public notes index loses `->public()` | 4 failed |
+| search loses its `where(fn …)` grouping (→ `public AND title ilike x OR content ilike x`) | 1 failed: the private note matching only on content leaked |
+| `published()` scope loses `<= now()` | 2 failed |
+| `NotePolicy` / `BlogPostPolicy` return `true` | 1 failed each |
+| logout no longer deletes the token | 1 failed |
+| `redirectGuestsTo(fn () => null)` removed | 2 failed (`text/html`, `*/*`) with 500 `Route [login] not defined`; the JSON case still got 401, exactly the shape of the 2026-08-26 bug |
+| `throttle:login` middleware removed | 2 failed |
+| `user_id` added to `Note`'s `$fillable` | **0 failed** (see below) |
+| …plus `update()` using `$request->except()` instead of `$request->safe()` | 1 failed |
+
+The `$fillable` result isn't a gap in the test. The controllers only ever pass
+`$request->safe()` (the validated keys) to `create()`/`update()`, and `user_id` isn't in
+any FormRequest's rules, so it's dropped before `$fillable` is ever checked. Two separate
+layers protect ownership, and the test fails once both are gone.
+
+### Gotchas
+
+- **The mutation check caught a bug in the new tests themselves.** The first version of
+  the Accept-header test built requests with `$this->withHeaders($headers)->call(...)`.
+  All three data sets passed. With `redirectGuestsTo` removed, *all three* failed,
+  including `application/json`, which the 2026-08-26 analysis says should be unaffected.
+  The cause: `call()` doesn't apply `withHeaders()` (only `get()`/`post()`/`json()` merge
+  those in). Every data set was quietly sending Symfony's default `text/html` Accept
+  header, so the "curl" and "JSON" cases weren't testing anything new. Fixed by passing
+  headers to `call()` as server vars
+  (`server: $this->transformHeadersToServerVars($headers)`), then re-checked that the
+  mutation now fails exactly the two non-JSON cases.
+- **Sanctum's guard caches the resolved user for the life of the app instance**, and a
+  feature test reuses one app across requests. So the logout test calls
+  `$this->app['auth']->forgetGuards()` between logging out and trying the token again.
+  Without it, the second request would be authorised from memory, and the "revoked token
+  → 401" assertion would pass without proving anything. The logout mutation above
+  confirms the test does catch a logout that doesn't revoke.
+- **Piping a script into `wsl bash -s` with `docker compose exec` inside it:** `exec -T`
+  reads stdin, so the first `exec` in a piped script swallows the rest of the script. The
+  symptom is that only the first step runs, with exit 0 and no error. Fix: add
+  `</dev/null` to every `exec`.
+- The first suite run this session took 472s. That wasn't slowness: each test waited on
+  a DNS timeout because `db` wasn't up. If a run is inexplicably slow, check that `db` is
+  healthy.
+
+### Production image check
+
+Built `Dockerfile.prod` locally and inspected the image:
+
+- **It cannot run tests.** There's no `vendor/phpunit`, no `vendor/bin/phpunit` and no
+  Faker (all `require-dev`, excluded by `composer install --no-dev`). `php artisan test`
+  gives `Command "test" is not defined`, because that command is registered by
+  `nunomaduro/collision`, also a dev package. `class_exists('Tests\TestCase')` returns
+  `false`, since `dump-autoload --no-dev` excludes `autoload-dev`.
+- **Flagged, not fixed in this change:** some test-related files do still ship, because
+  `backend/.dockerignore` doesn't exclude them and the vendor stage does `COPY . .`.
+  They are `tests/`, `phpunit.xml`, `.phpunit.result.cache` (gitignored, but present in a
+  local build context), and `backend/CLAUDE.md`/`AGENTS.md`. `database/factories/` also
+  ships (it's in the non-dev `autoload`, which is standard Laravel layout), but it does
+  nothing without Faker. None of it can be reached over the web (nginx serves `public/`
+  only) or run without PHPUnit, so this is tidiness and image size, not exposure.
+  Possible follow-up: add `tests/`, `phpunit.xml`, `.phpunit.result.cache` and the agent
+  `.md` files to `backend/.dockerignore`.
+
+### Notes for the upcoming GitHub Actions workflow
+
+- `phpunit.xml` needs no changes for CI. It pins only `DB_CONNECTION=pgsql` and
+  `DB_DATABASE=devnotes_test`. `DB_HOST`, `DB_PORT`, `DB_USERNAME` and `DB_PASSWORD`
+  still come from the environment. The Postgres service container should set
+  `POSTGRES_DB: devnotes_test`, so the database exists without a createdb step. The job's
+  `env:` should set `DB_HOST: 127.0.0.1` (or `localhost`), `DB_PORT: 5432`, and matching
+  `DB_USERNAME`/`DB_PASSWORD` (throwaway CI-only values, not real secrets). If a CI setup
+  ever needs a different database name, it must still end in `_test` or the guard will
+  abort. That's intended.
+- No `APP_KEY` or `.env` is needed. Verified by running the full suite with `APP_KEY`
+  forced empty (`docker compose exec -e APP_KEY= backend php artisan test`): 46 passed.
+- The PHP runtime needs `pdo_pgsql`, `gd` (with JPEG + WebP) and `exif`, or
+  `ImageUploadTest` fails. Either copy the dev `Dockerfile`'s extension list or run the
+  job inside the dev image.
+- Use `php artisan test` (or `composer test`, which runs `config:clear` first), not a
+  cached config.
+
+### Noted, not changed
+
+`BlogPostController@show` checks `published_at->isPast()` (strictly `<`), while the
+`published()` scope used by the list checks `<= now()`. So a post whose `published_at`
+equals the current instant exactly would be listed but return 404 on its slug for that
+one instant. In practice this can't happen (the column has second precision and `now()`
+carries microseconds), so it wasn't treated or tested as a bug. It matters only as a
+reason for the server-side "publish now" work to freeze time in its tests.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies**: none. `composer.json`/`composer.lock` are unchanged. The
+  factories use `fakerphp/faker`, which is already in `require-dev`.
+- **Cost/infra impact**: none. The changes are dev-only (a `docker-compose.yml` mount and
+  a second database in the local `db` container). `docker-compose.prod.yml`,
+  `Dockerfile.prod` and the Droplet are untouched. No new endpoint, container, job or
+  outbound call.
+- **New attack surface**: none. No application code changed (every mutation check was
+  reverted and the tree confirmed clean). The only new files are tests, factories (which
+  do nothing in prod without Faker), docs, and a dev-only SQL init script.

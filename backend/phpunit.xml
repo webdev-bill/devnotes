@@ -23,9 +23,23 @@
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
-        <env name="DB_CONNECTION" value="sqlite"/>
-        <env name="DB_DATABASE" value=":memory:"/>
-        <env name="DB_URL" value=""/>
+        <!--
+            <server>, not <env>: docker-compose.yml sets DB_CONNECTION and
+            DB_DATABASE on the backend container, and a plain <env> skips any
+            variable already in the real environment, so the suite silently
+            ran (and RefreshDatabase wiped) the dev database. <env force="true">
+            is NOT enough either: it only writes putenv()/$_ENV, while
+            Laravel's env() reads $_SERVER first, which PHP CLI fills from the
+            container environment. <server> writes $_SERVER unconditionally.
+            Only the driver and database name are pinned; DB_HOST, DB_PORT,
+            DB_USERNAME and DB_PASSWORD still come from the environment
+            (compose locally, the workflow's env block in CI). Postgres, not
+            SQLite, because the notes search uses ilike. tests/TestCase.php
+            refuses to run against any database not named *_test.
+        -->
+        <server name="DB_CONNECTION" value="pgsql"/>
+        <server name="DB_DATABASE" value="devnotes_test"/>
+        <server name="DB_URL" value=""/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>

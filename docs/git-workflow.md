@@ -124,6 +124,35 @@ Note: this only guards commits made *from now on*. It doesn't retroactively scan
 history — a full manual history audit was done separately and is logged in
 `docs/server-setup-runbook.md`.
 
+## Testing (backend)
+
+Run the backend test suite inside the dev stack (with `docker compose up` running):
+
+```bash
+docker compose exec backend php artisan test
+```
+
+Filter to one file or test with `--filter`, e.g.
+`docker compose exec backend php artisan test --filter AuthTest`.
+
+Tests run against a separate **`devnotes_test`** database in the same `db` container —
+never the dev `devnotes` database. `phpunit.xml` pins the database name, and
+`tests/TestCase.php` aborts every test before any migration runs if the connected
+database name doesn't end in `_test`. If you ever see `Refusing to run tests against
+database "..."`, that guard just stopped the run from wiping that database — fix the
+config, don't work around the guard.
+
+**One-time setup for an existing dev volume.** `devnotes_test` is created automatically
+only when the `db` volume is brand new (`docker/postgres-init/`). If your volume predates
+that (anything created before 2026-09-23), create it once:
+
+```bash
+docker compose exec db sh -c 'createdb -U "$POSTGRES_USER" devnotes_test'
+```
+
+Run tests before committing backend changes. Background, gotchas, and what the suite
+covers: `docs/server-setup-runbook.md`, 2026-09-23 entry.
+
 ## Note for Claude Code
 
 When making commits in this repo, follow this exact workflow:
