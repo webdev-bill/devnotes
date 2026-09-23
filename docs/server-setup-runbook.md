@@ -4493,3 +4493,159 @@ reading the output, and after `wsl --shutdown`, Docker Desktop has to be started
   (`contents: read`). The CI Postgres credentials are public on purpose and only
   reach a database that exists for the length of one job. No new write path, and no
   application code changed.
+
+## 2026-09-24 — Runner Pin, Deploy Key `restrict`, and the SHA-Pinned Deploy (Deliberately Deferred)
+
+Follow-up to the "CI Test Gate" entry above. What was done: the CI runner is pinned to
+`ubuntu-24.04`, the dev-image rebuild was verified (logged as an update inside the entry
+above, not repeated here), and the user tightened the deploy key's options. The
+SHA-pinned deploy that would close the last race was designed, then **deliberately
+parked** by the user's decision. No `deploy.sh` change, test harness or other
+deploy-related code was written or pushed. Nothing on the Droplet was touched by Claude
+Code; the server facts below are from the user's own read-only checks.
+
+### Runner pinned to `ubuntu-24.04`
+
+Both jobs in `.github/workflows/deploy.yml` changed from `runs-on: ubuntu-latest` to
+`runs-on: ubuntu-24.04` (`9a22df3`). The reason is GitHub's notice on every run:
+`ubuntu-latest` moves to Ubuntu 26 from 2026-10-19. The test job depends on the runner
+image (setup-php's prebuilt extensions, including gd with WebP, and the Postgres service
+container), and a runner change nobody chose should never be able to block deploys.
+Verified: run `35890278534` had both jobs green, and the jobs API reported
+`labels=["ubuntu-24.04"]` for both. `actionlint` was clean before pushing.
+
+**Moving to 26.04 is a deliberate future upgrade, not something to let happen
+automatically.** When it's done: bump both jobs in the same commit, watch the first run's
+test job specifically (extensions and the service container), and expect `24.04` itself
+to be deprecated eventually. GitHub announces those dates in the same run notices.
+
+### Deploy key: `no-pty` → `restrict` (user change)
+
+The user changed the deploy key's `authorized_keys` options from `no-pty` to `restrict`.
+The forced command is unchanged: `command="~/devnotes/deploy.sh"` (key user `andrew`,
+repo at `/home/andrew/devnotes` on `main`). The `~` works because sshd runs the forced
+command through the user's login shell.
+
+**Why it mattered.** A forced command decides *which command runs* for a session. It does
+**not** stop the client from asking for other SSH channels. With only `no-pty`, TCP port
+forwarding (`-L`/`-R`/`-D`), agent forwarding and X11 forwarding were all still allowed
+for that key, unless they were disabled server-wide in `sshd_config`. That wasn't
+checked, so assume they weren't. So a leaked `DEPLOY_SSH_KEY` could not run arbitrary
+commands, but it could have opened `ssh -N -L …` tunnels from the Droplet to anything
+listening on its localhost or its private Docker networks. `restrict` turns off all
+forwarding, PTY allocation and `~/.ssh/rc` execution in one keyword. It also covers any
+restrictions future OpenSSH versions add, which is why it's preferred over listing
+`no-port-forwarding,no-agent-forwarding,…` one by one.
+
+**Verified:** after the change, the user triggered a manual `workflow_dispatch` deploy.
+Run **`35895710042`** (on `726e915`) completed **success** for both jobs, and the
+`Trigger deploy via SSH` step itself succeeded. So the forced command still runs
+under `restrict`. The run result was read through the API; that the run came after the
+key change is from the user's report. **Not verified:** that forwarding is now actually
+refused. A direct check (user-side, since it needs the deploy key) would be
+`ssh -i <deploy key> -N -L 15432:localhost:5432 andrew@<host>`, followed by trying to
+use the tunnel. The forwarding request should fail with "administratively prohibited".
+
+### SHA-pinned deploy: open item, deliberately deferred
+
+**The gap** (from the CI Test Gate entry): `deploy.sh` runs `git pull origin main`, so
+it deploys whatever `main` is at pull time, not the commit CI tested. The "still
+latest?" check in the deploy job closes most of the window, but a few seconds remain
+between that check and the server's `git pull` (SSH connect plus the script's startup).
+
+**Risk assessment (why it's parked).** Solo project, one committer. It needs a
+*failing* push to land within seconds of a *passing* one, and the passing run has to be
+exactly in that window. The worst case is broken code live on the site until the next
+push. That's an availability problem, not a security one, because anything that reaches
+`main` is already trusted to run on the server. The fix, by contrast, changes the
+security-relevant deploy path and has an awkward rollout (see below). So the user chose
+to defer it. The practical rule until then: don't push a likely-red commit within about
+a minute of a green one.
+
+**Design notes gathered so far**, so the future session starts from here, not from
+scratch:
+
+- **The SHA can reach the server without changing the forced command.** When a
+  `command="…"` forced command runs, sshd puts whatever the client asked to run into
+  `$SSH_ORIGINAL_COMMAND`. The workflow can send `deploy ${{ github.sha }}` as
+  ssh-action's `script`, and the existing `~/devnotes/deploy.sh` can read that variable.
+  *Correction to the CI Test Gate entry above,* which said the fix "means changing the
+  `authorized_keys` forced-command entry to read `$SSH_ORIGINAL_COMMAND`": that's
+  optional, not required. It's still worth considering a *separate* entry script, with
+  the forced command pointed at it, because then switching it on or back is a one-line
+  `authorized_keys` edit on the server, owned by the user, with no push involved.
+- **`deploy.sh` lives in the repo and updates itself.** The server's copy is the
+  working-tree file in `~/devnotes`, and each deploy's `git pull` rewrites it. The
+  deploy triggered by the push that changes `deploy.sh` still runs the *old* script
+  (which pulls the new file), and the new logic first runs on the deploy after that.
+  One consequence: a broken new `deploy.sh` can break the very deploy that would ship
+  its fix, so rollback may need a manual step on the server. That's also why a
+  `CLAUDE.md` hard rule was proposed alongside this entry: treat any `deploy.sh` commit
+  as a server-side change that needs the user's explicit approval before it's pushed.
+  It goes in its own commit, only once approved.
+- **Validating the SHA (it's untrusted network input).** Match `SSH_ORIGINAL_COMMAND`
+  against `^deploy ([0-9a-f]{40})$` with bash `[[ =~ ]]`. Only the captured 40 hex
+  characters go any further; the raw value is never `eval`'d, passed to `sh -c`, or
+  expanded unquoted. If it's logged at all, use `printf %q` and cut it to about 200
+  characters. A malformed request is rejected and deploys nothing, and never falls back
+  to "deploy `main`". The regex was checked locally on bash 5.3 against: exact match
+  (accepted), and trailing newline, newline plus a second command, `;`, `$(…)`, a
+  leading space, a double space, uppercase hex, 39 and 41 characters, the verb alone,
+  empty, and the current workflow's `echo` script (all rejected). Re-check on the
+  server's bash before relying on it. Then: `git fetch origin main`;
+  `git cat-file -e "$sha^{commit}"` (must exist); `git merge-base --is-ancestor "$sha"
+  origin/main` (**must be reachable from `origin/main`**, so a commit from any other ref
+  can't be deployed); move to it; assert `git rev-parse HEAD` equals `$sha`.
+- **Detached-HEAD handling for the legacy path.** The obvious `git checkout "$sha"`
+  leaves the server on a detached HEAD. Any later run of the *legacy* path (a manual
+  deploy, or a rollback to the old script) then fails at `git pull origin main`
+  ("You are not currently on a branch"). So either use `git merge --ff-only "$sha"`,
+  which keeps `main` checked out and moves it forward to the SHA (and, together with the
+  `HEAD == sha` assertion, refuses to move backwards), or have the legacy path run
+  `git checkout main` before pulling. The first option is preferred.
+- **`flock`.** CI's `production-deploy` concurrency group only serialises CI. A manual
+  run on the server could still overlap a CI deploy. A lock at the top of `deploy.sh`
+  (`exec 9>/tmp/devnotes-deploy.lock; flock -w 600 9`) would serialise both.
+- **Rollback.** Reverting `deploy.sh` to a pre-change commit restores today's legacy
+  behaviour: an unconditional `git pull origin main`, ignoring `SSH_ORIGINAL_COMMAND`.
+  Because the script updates itself, the revert is delivered by a run of the *new*
+  script. If that script is broken, the user restores it on the server after pushing the
+  revert: `cd ~/devnotes && git status` (it must be clean), then
+  `git fetch origin && git merge --ff-only origin/main`, and re-trigger with
+  `workflow_dispatch`. If the pinned path had left a detached HEAD, `git checkout main`
+  comes first.
+- **Rollout order considered.** (1) Push the new script support, which is inert while
+  nothing sends a SHA. (2) Workflow starts sending `deploy <sha>`, which the current
+  script still ignores. (3) The user tests rejection cases on the server locally, e.g.
+  `SSH_ORIGINAL_COMMAND='deploy nothex' ~/devnotes/<entry script>` → exit 1, HEAD
+  unchanged. (4) The user switches it on. (5) A harmless push to prove it. Each step
+  can be reversed on its own.
+- **The "still latest?" check stays** once pinning exists, but it becomes an
+  efficiency measure (skipping a full `--build` on the $6 Droplet for a superseded
+  commit), not a safety control. Its workflow comments should say so then.
+- **Proof plan (not built):** a local sandbox (a bare "origin" repo plus a clone acting
+  as the server, with `prod-compose.sh`/`curl` stubbed and `HOME` redirected) running
+  the real scripts. The case production can't reproduce on demand is: with `main` at Z,
+  `deploy <Y>` leaves HEAD at Y. Plus every rejection case above, a commit only on
+  another branch, an older commit (refuse), and the legacy path. In production: the
+  server's `git rev-parse HEAD` equals the run's `head_sha`, and (with `gh` logs) the job
+  log shows the pinned SHA.
+
+### What went wrong / corrections
+
+- The CI Test Gate entry overstated what the fix needs (a forced-command change). It's
+  corrected above.
+- The dev-image retry after `wsl --shutdown` first "succeeded" with exit 0 while Docker
+  wasn't even available in the distro. It's logged, with the actual fix, in the update
+  inside the CI Test Gate entry.
+- `gh` is still not installed. Everything here was read through the anonymous REST API,
+  which gives run, job and step results but not logs.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none. No app manifests changed, and no new GitHub Actions.
+- **Cost/infra impact:** none. Same hosted runners (just pinned to a version), no new
+  server-side work. The `restrict` change is a tightening on the server side made by
+  the user.
+- **New attack surface:** none added, and some removed: the deploy key can no longer
+  open port, agent or X11 forwarding channels. The SHA-pinned deploy, which *would* add
+  a validated network input to the deploy path, was not built.
