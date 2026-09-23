@@ -138,7 +138,9 @@ reboot
 - [ ] Point Cloudflare DNS (A record) to the Droplet's IP
 - [x] Set up GitHub Actions for build + deploy — done and verified working
       end-to-end 2026-08-27, see that session's log below
-- [ ] Configure Postgres backups to S3-compatible storage (e.g. Backblaze B2)
+- [x] Configure Postgres backups to S3-compatible storage (e.g. Backblaze B2) —
+      done; encrypted B2 uploads verified, see the backup-db.sh section; scheduling
+      tracked separately below
 - [ ] Write DEPLOYMENT.md — a from-scratch rebuild guide
 - [ ] Add pagination controls to the notes list pages (`/notes` and `/my/notes`)
       — deliberately deferred in the 2026-08-26 notes/blog pages session, both
@@ -163,6 +165,9 @@ reboot
       ready, only started. `deploy.sh`'s health-check retry loop (added
       2026-08-27) papers over this at the deploy-script level; real
       healthchecks would fix it at the source instead
+- [ ] Schedule backup-db.sh (currently manual only); it's gated host code, so it
+      needs its own session with the user making the server-side change. Added
+      2026-09-24, see that date's "Host-executed repo code" note
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -4640,6 +4645,33 @@ scratch:
   inside the CI Test Gate entry.
 - `gh` is still not installed. Everything here was read through the anonymous REST API,
   which gives run, job and step results but not logs.
+
+### Host-executed repo code: new `CLAUDE.md` rules
+
+Added to `CLAUDE.md`'s hard rules, in two tiers:
+
+- **Approval gate:** before each push, show the full diff and get explicit approval
+  for **any script or file from the repo that executes on the Droplet's host, outside
+  containers**, whether it's started by `deploy.sh`, cron, a systemd timer or by hand.
+  Current examples: `deploy.sh`, `scripts/prod-compose.sh`, `scripts/backup-db.sh`,
+  `scripts/restore-db.sh`. Commands run *inside* containers and the Dockerfiles are
+  ordinary app code.
+- **Must flag, no gate:** changes to `docker-compose.prod.yml` that affect host
+  exposure or privileges (published ports, host-path or Docker-socket mounts,
+  `privileged`, `network_mode: host`, `cap_add`) must be called out under "New attack
+  surface" in the completion report.
+
+The reason is the self-updating checkout described above. The server executes these
+files straight from `/home/andrew/devnotes`, which every deploy moves to `main`, so a
+push changes server behaviour without anyone touching the server.
+
+**How the backup scripts currently run on the server (user's read-only check,
+2026-09-24): by hand only.** There's no crontab for `andrew` or `root`. `/etc/cron.d`
+has only Ubuntu's defaults (`e2scrub_all`, `sysstat`). The only matching systemd timer
+is Ubuntu's own `dpkg-db-backup.timer`, which has nothing to do with devnotes. So
+`backup-db.sh` has no schedule at all. Backups happen only when someone runs it. That
+gap is now on the "Still to do" list at the top of this file. Scheduling it is itself
+gated host code, and needs a session in which the user makes the server-side change.
 
 **Standing checklist** (per `CLAUDE.md`):
 - **New dependencies:** none. No app manifests changed, and no new GitHub Actions.

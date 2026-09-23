@@ -10,6 +10,33 @@
   an equivalent replacement (e.g. moving auth to httpOnly cookies) reopens a real
   XSS-to-token-theft path. Full rationale logged in `docs/server-setup-runbook.md`.
 
+- **Host-executed repo code is server-side code: approval gate.** The Droplet runs
+  code straight from its checkout of this repo (`/home/andrew/devnotes`, updated to
+  `main` by every deploy's `git pull`; the deploy key's SSH forced command is
+  `command="~/devnotes/deploy.sh"`). So a push can change what runs **directly on the
+  Droplet's host**, even though the edit happens in the repo. The gate covers **any
+  script or file from the repo that executes on the Droplet's host, outside
+  containers**, however it's started: by `deploy.sh`, cron, a systemd timer, or by
+  hand. That includes files such a script sources and helpers it calls. A new
+  host-side script, or a new way of starting one, is covered from the commit that
+  introduces it. Current examples (not the definition): `deploy.sh`,
+  `scripts/prod-compose.sh`, `scripts/backup-db.sh` and `scripts/restore-db.sh`.
+  Commands a host script runs *inside* a container (e.g.
+  `prod-compose.sh exec … php artisan …`) are ordinary app code. So are the
+  Dockerfiles, which build inside containers. `docker-compose.prod.yml` is config
+  that `docker compose` reads rather than a script it runs, and it's covered by the
+  next rule, not this one. The user makes all server-side changes, so before
+  **each** push that touches any of these, show the user the full diff and get
+  explicit approval for that specific push. That's the same boundary as SSH, keys
+  and secrets. Approval for one push doesn't carry over to the next.
+- **Host exposure in `docker-compose.prod.yml`: must flag, no approval gate.** Any
+  change that affects the host's exposure or privileges must be called out
+  explicitly under "New attack surface" in the completion report. That includes
+  published `ports:`, host-path bind mounts, mounting the Docker socket,
+  `privileged:`, `network_mode: host` and `cap_add:`. Ordinary app/service changes
+  in that file (images, env vars, labels, depends_on, named volumes) don't need
+  special handling.
+
 ## Where to look for more context
 
 - `docs/git-workflow.md` — commit workflow, commit message format, gitleaks pre-commit
