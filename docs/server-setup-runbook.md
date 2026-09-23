@@ -4242,3 +4242,229 @@ reason for the server-side "publish now" work to freeze time in its tests.
 - **New attack surface**: none. No application code changed (every mutation check was
   reverted and the tree confirmed clean). The only new files are tests, factories (which
   do nothing in prod without Faker), docs, and a dev-only SQL init script.
+
+## 2026-09-24 — CI Test Gate: Backend Tests in GitHub Actions, Deploy Blocked on a Red Suite
+
+Follow-up to the 2026-09-23 test-suite entry. Before this session the 46 backend tests
+only ran locally, so nothing stopped a failing suite from reaching production: every
+push to `main` went straight to `deploy.sh` on the Droplet. This session adds a test job
+in GitHub Actions and makes deploy depend on it. It also cleans up the loose ends flagged
+last time. The work ran from late 2026-09-23 into 2026-09-24. Nothing on the Droplet was
+touched, and no repository secrets were added or changed.
+
+### What was built
+
+`.github/workflows/deploy.yml`, renamed from "Deploy to Production" to **"Test and
+Deploy"**. It still triggers on push to `main` and on `workflow_dispatch`, with
+`permissions: contents: read`.
+
+- **`test` job:** a `postgres:16` service container with `POSTGRES_DB: devnotes_test`,
+  health-checked with `pg_isready` so the job waits until Postgres is ready.
+  `shivammathur/setup-php` installs PHP 8.4 with `pdo_pgsql`, `gd` and `exif` (the same
+  set the dev and prod images compile in). Composer's download cache is kept with
+  `actions/cache`, keyed on the hash of `backend/composer.lock`. The job then runs
+  `composer install` and `php artisan test`. Host, port, user and password come from the
+  job's `env:`. `phpunit.xml` is unchanged, and neither an `APP_KEY` nor a `.env` is
+  needed, as last session's entry predicted.
+- **CI database credentials:** `devnotes_ci` / `ci-throwaway-not-a-secret`. They're
+  deliberately a label, commented in the workflow as throwaway and CI-only. I checked
+  every local env file (`.env`, `backend/.env`, both `.example`s) for the value with a
+  match count only, so no contents were printed: 0 matches. I couldn't check the
+  Droplet's `.env.production`, so that part is **not verified**. The user needs to confirm
+  the value isn't used there.
+- **`deploy` job:**
+  - `needs: test` and `if: github.ref == 'refs/heads/main'`.
+  - A job-level `concurrency: { group: production-deploy, cancel-in-progress: false }`.
+    Before this there was no concurrency limit, so two quick pushes could run two
+    `deploy.sh` processes on the Droplet at once. Cancel-in-progress is off on purpose:
+    killing the SSH session mid-deploy could stop `docker compose up --build` halfway.
+  - A **"still latest?" check** (see the race condition below), then the unchanged SSH
+    trigger.
+- **Composer cache:** the first run was a cache miss by definition. The failing run's
+  "Post Run actions/cache" step shows `skipped`, because `actions/cache` only saves on
+  job success, so a red run never writes a partial cache.
+
+### The race condition, and why `needs: test` alone wasn't enough
+
+`deploy.sh` runs `git pull origin main`. It deploys **whatever `main` is at pull time,
+not the commit the workflow tested.** So with `needs: test` alone:
+
+1. Push A. Run A starts testing A.
+2. Push B, which breaks the suite. Run B starts testing B.
+3. A passes. Run A's deploy runs `deploy.sh`, which pulls `main`, which is now B.
+4. B is live, untested, while run B is still going red.
+
+**The partial fix** is a step at the start of the deploy job. It reads the live `main`
+SHA with `git ls-remote https://github.com/webdev-bill/devnotes refs/heads/main` (the
+repo is public, so no token is needed) and compares it with `$GITHUB_SHA`. If `main` has
+moved on, the job emits
+`::notice title=Deploy skipped::main is now at <newer>, which supersedes this run's <this>. The newer run will test and deploy it.`
+and skips the SSH step. If it can't read the SHA at all, it fails with an `::error::`
+rather than deploying blind. Skipping a superseded run is always correct. The newer run
+contains that commit's changes, and if the newer run fails, nothing new should deploy.
+
+**Open item: the remaining gap.** There's still a window of a few seconds between that
+check and `deploy.sh`'s `git pull` on the server: SSH connect plus the start of the
+script. A push that lands in that window would be deployed untested. **The full fix is
+server-side:** the workflow passes the tested SHA over the SSH connection, and
+`deploy.sh` checks out exactly that SHA instead of pulling `main`. It should also
+validate it, for example that it's a 40-hex commit that's an ancestor of `origin/main`,
+so the deploy key still can't be used to deploy an arbitrary ref. The forced command
+currently ignores whatever the client sends. So this means changing the
+`authorized_keys` forced-command entry to read `$SSH_ORIGINAL_COMMAND`, plus changing
+`deploy.sh`. That's on the Droplet, deliberately left for the user to do in a future
+session. Until then, the practical rule is to avoid pushing twice within about a minute
+when the second push might be red.
+
+### Action pinning
+
+- **`appleboy/ssh-action` → `029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3`.** This
+  is the same release the workflow already used, deliberately not upgraded. It's the
+  action that receives `DEPLOY_SSH_KEY`, so a moved or compromised tag would matter most
+  here. I confirmed through the Git refs API that `v1.0.3` is a lightweight tag pointing
+  straight at a commit object (commit date 2024-01-07), so the pinned SHA is the commit
+  itself and not a tag object.
+- **`shivammathur/setup-php` → `f3e473d116dcccaddc5834248c87452386958240 # 2.37.2`**,
+  the latest release, which is also a lightweight tag at a commit. It's third-party but
+  holds no secrets, and pinning it is cheap.
+- **`actions/checkout@v7`, `actions/cache@v6`:** these are GitHub-owned, so major tags
+  are kept. I checked each one rather than assuming. The releases API shows
+  `checkout` v7.0.1 (published 2026-07-20) and `cache` v6.1.0 (2026-06-26) as the latest
+  non-draft, non-prerelease releases, and `git ls-remote` shows `v7` and `v6` pointing
+  at exactly those commits (`3d3c42e5…` and `55cc8345…`).
+- The workflow was linted with `actionlint` 1.7.12 before pushing (a release binary
+  downloaded to a scratch directory for a one-off run, not added to the project): no
+  problems.
+
+### Verification: runs, jobs and conclusions
+
+All of these were read through the public REST API. `gh` is still not installed anywhere
+on this machine.
+
+| Run | Commit | `test` | `deploy` | What it proves |
+|---|---|---|---|---|
+| `35884642086` | `d1b0e12` (the workflow itself) | success (32s) | success (47s): check passed, SSH step ran | the happy path: Postgres service, setup-php, cache, suite, deploy |
+| `35886792850` | `67c0761` (heading fix) | success | success, but **SSH step `skipped`**, with the notice `main is now at 85d72d57…, which supersedes this run's 67c07617…` | the "still latest?" branch works in a real run |
+| `35886814099` | `85d72d5` (deliberately failing test) | **failure** (step 8 `php artisan test`: "Process completed with exit code 1") | **skipped**: never ran, not failed | **a red suite never reaches the Droplet** |
+| `35887080287` | `62aa607` (revert) | success | success: check passed, SSH step ran | back to green, and the deploy includes the heading fix |
+
+About the negative-gate proof: `85d72d5` added one test that calls `$this->fail(...)`,
+and `62aa607` reverts it. Both use `test:` messages that say what they're for. The run
+for the heading fix and the run for the failing test were triggered on purpose a few
+seconds apart. That exercised both skip paths in one sequence: the heading-fix run was
+superseded, and the failing run was blocked by `needs:`. That was safe even if the gate
+had been broken: the probe commit only added a test file, and `tests/` no longer ships
+in the prod image.
+
+**What I couldn't see directly:** job logs. The logs endpoint returns
+`403 Must have admin rights to Repository.` even for a public repo, so the
+"46 passed" line and the per-test output were never read. That all 46 tests ran,
+including `ImageUploadTest`, is inferred from step 8 succeeding, because
+`php artisan test` exits non-zero on any failure or error. That also settles last
+session's open question: **setup-php's `gd` has WebP**, since `ImageUploadTest` asserts
+that the stored output really is `image/webp`. To see the actual output, open any run's
+`test` job → "Run php artisan test" in the Actions tab.
+
+### Production image: test and dev-only files excluded
+
+`backend/.dockerignore` now also excludes `tests/`, `phpunit.xml`,
+`.phpunit.result.cache`, `README.md`, `.env.example`, `.npmrc` (scaffold leftovers; the
+backend has no `package.json`), `.git`, `.gitignore`, `.gitattributes`, `.editorconfig`,
+`.dockerignore` and both Dockerfiles. Docker still reads the Dockerfiles and the ignore
+file to run the build; excluding them only stops `COPY . .` from copying them into the
+image. `docker/` stays in the build context because `Dockerfile.prod` copies its
+nginx/supervisord/uploads configs.
+
+Verified by building, not assumed:
+- I built `Dockerfile.prod` locally and listed `/var/www/html`. It now holds only `app
+  artisan bootstrap composer.json composer.lock config database docker
+  index.nginx-debian.html public resources routes storage vendor`. Every excluded path
+  was checked individually and is absent. `bootstrap/cache/packages.php` references no
+  dev providers (0 matches for collision/pail).
+- Smoke test, same method as the production-compose session: I ran the image with
+  throwaway env (a random `APP_KEY`, SQLite) and got `GET /up` → **200** through
+  nginx → PHP-FPM → Laravel, with `supervisord` ×1, `nginx` ×7 and `php-fpm` ×3 running.
+  Those counts were read from `/proc/*/comm`, because the image has no `ps`; my first
+  attempt used `ps` and printed nothing. Over HTTP, `/phpunit.xml` and
+  `/tests/TestCase.php` return 404 and `/.env` returns 403. The test image was removed
+  afterward.
+- `index.nginx-debian.html` at the app root comes from the Debian `nginx` package
+  install writing its default page into `/var/www/html`. It isn't served (nginx's root is
+  `public/`) and is harmless, so I noted it and left it.
+- The first push of this change (`195bed6`) was deployed by the old, ungated workflow
+  (run conclusion: success), before the CI gate existed.
+
+**Dev image: not fully verified.** `docker compose build backend` failed three times
+this session with `failed to fetch anonymous token ... auth.docker.io ... i/o timeout`.
+The cause is **WSL's networking, not Docker Hub**: the same token URL returns 200 from
+Windows and times out from WSL. It also explains why `git ls-remote` hung from WSL
+earlier in the session. The classic builder (`DOCKER_BUILDKIT=0`) was no help. It trips
+over a root-owned `storage/framework/testing/disks` directory left behind by
+`Storage::fake`, which BuildKit skips because it's ignored, and `php:8.4-cli` isn't
+cached locally anyway. **What was verified instead:** inside the running dev container,
+on a copy of the backend with the ignored files removed, the dev Dockerfile's exact
+`composer install --no-interaction --prefer-dist --optimize-autoloader` exited **0**
+with no warnings, even though `autoload-dev`'s `Tests\` directory is missing. The suite
+still passes 46/46 through the bind mount. So the one real risk to the dev image
+(Composer choking on the missing `tests/`) is covered. A genuine rebuild of the dev
+image with the new ignore rules is still **unverified**. Likely fix: `wsl --shutdown`
+from Windows, then retry `docker compose build backend`.
+
+### Smaller cleanups (each its own commit)
+
+- `docs:` `backend/README.md`: removed the stock "Agentic Development" section
+  (`composer require laravel/boost` / `php artisan boost:install`), left over after
+  last session removed the Boost bootstrap files.
+- `docs:` `docs/git-workflow.md`: added a `test` row ("Added or changed tests only") to
+  the commit type table.
+- `docs:` `docs/git-workflow.md`: removed a duplicated `# Git Workflow — devnotes` title
+  (lines 1 and 3). The "stray dependency-licenses fragment" the user remembered at the
+  end of that file **wasn't there**. It ends cleanly with "Push after every commit,
+  unless told otherwise."
+- `CLAUDE.md` already contains the standing completion rule (the "Standing verification
+  checklist" section, added in `cd992ae` on 2026-09-07), so it needed no change.
+
+### What went wrong
+
+- **My first API poller never matched anything.** The pattern assumed compact JSON
+  (`"id":123`), but GitHub pretty-prints (`"id": 123`). It polled 30 times, gave up with
+  an empty run id, and used most of the 60-per-hour unauthenticated quota. I replaced it
+  with a small `node` script that parses the JSON properly and polls once a minute.
+  Lesson: parse JSON as JSON, and check the first response by eye before looping on it.
+- **Wrong date in a workflow comment, caught before committing.** The deploy-job comment
+  first pointed at a "2026-09-24 runbook entry" while it was still 2026-09-23. I changed
+  it to refer to this entry by title ("CI Test Gate") so it can't be wrong again.
+- **`ps` isn't in the prod image**, so the first supervisor-process check printed
+  nothing. The 200 from `/up` already proved the chain; the second build used `/proc`.
+- **Composer exit code:** my first dev-image check printed `tail`'s exit status
+  (`composer ... | tail; echo $?`), not Composer's. It said 0, but that meant nothing. I
+  reran it with Composer's output sent to a file and `$?` captured directly: 0.
+- **Pushing without a gate:** the three cleanup commits (`d99a734`, `216e251`,
+  `195bed6`) were pushed together in one push before the gate existed. That was on
+  purpose, to trigger one deploy instead of three, because the old workflow had no
+  concurrency limit and quick successive pushes could overlap `deploy.sh` runs.
+
+### Notes for later
+
+- GitHub's own notice on every run: **`ubuntu-latest` moves to Ubuntu 26 from
+  2026-10-19.** The runner image then changes under this workflow. If setup-php's
+  extensions or the Postgres service behave differently after that date, pin
+  `runs-on: ubuntu-24.04`.
+- Unauthenticated API reads are enough to confirm runs (`/actions/runs`, `/runs/{id}/jobs`,
+  `/check-runs/{id}/annotations`), but not logs. Installing `gh` (or opening the Actions
+  tab) is the way to read test output.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none in the app. `composer.json`/`composer.lock` and
+  `frontend/package*.json` are unchanged. New *CI* dependencies (GitHub Actions, not
+  shipped code): `shivammathur/setup-php` 2.37.2 (MIT), `actions/checkout` v7 (MIT),
+  `actions/cache` v6 (MIT); `appleboy/ssh-action` v1.0.3 (MIT) was already in use. All
+  permissive.
+- **Cost/infra impact:** none on the Droplet. The test job runs on GitHub's hosted
+  runners (free for public repositories), about 30s per push. Deploys now wait about 30s
+  longer for tests. No new container, endpoint, job or outbound call on the server.
+- **New attack surface:** none in the app. In CI: the workflow still holds only the
+  three existing secrets, now passed to a SHA-pinned action. The token is read-only
+  (`contents: read`). The CI Postgres credentials are public on purpose and only
+  reach a database that exists for the length of one job. No new write path, and no
+  application code changed.
