@@ -4410,6 +4410,31 @@ still passes 46/46 through the bind mount. So the one real risk to the dev image
 image with the new ignore rules is still **unverified**. Likely fix: `wsl --shutdown`
 from Windows, then retry `docker compose build backend`.
 
+**Update, later on 2026-09-24: now verified. The likely fix above was wrong.**
+`wsl --shutdown` alone didn't fix it:
+- After the restart, `docker` had disappeared from the distro entirely ("could not be
+  found in this WSL 2 distro"), because the shutdown also stopped Docker Desktop's
+  engine. That stub message **exits 0**, so the first retry reported `build exit=0`
+  while building nothing.
+- Once Docker Desktop was restarted, the WSL-side build failed again with the same token
+  timeout, and `curl` from inside the distro still timed out as well.
+- But `docker pull php:8.4-cli` from the **Windows** Docker client, against the same
+  engine, succeeded. With the base image cached locally, BuildKit no longer needed the
+  registry, and the WSL-side `docker compose build backend` completed (`backend Built`).
+
+Checked in the build log, not just from the result: `COPY . .` was rebuilt because the
+new `.dockerignore` changes the context, so `composer install -o` genuinely re-ran
+(`117 installs`, `Generating optimized autoload files`, package discovery `DONE`) with
+no warnings. The baked image has none of the excluded files (`tests/`, `phpunit.xml`,
+`.phpunit.result.cache`, `README.md`, `.env.example`, `.npmrc`) and still has the dev
+tooling (`vendor/bin/phpunit`). The dev stack, via the bind mount, passes **46/46 (141
+assertions)**.
+
+The root cause of WSL-side registry access failing while Windows-side access works is
+**still not diagnosed**. Workaround if it recurs: `docker pull <base image>` from a
+Windows shell, then build as normal. Two lessons: don't trust an exit code without
+reading the output, and after `wsl --shutdown`, Docker Desktop has to be started again.
+
 ### Smaller cleanups (each its own commit)
 
 - `docs:` `backend/README.md`: removed the stock "Agentic Development" section
