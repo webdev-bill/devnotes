@@ -1,16 +1,116 @@
-name: Deploy to Production
+name: Test and Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Throwaway, CI-only credentials for a database that exists only for
+          # the length of this job. NOT a secret, deliberately not used in dev
+          # or production, and safe to be public — don't reuse it anywhere.
+          POSTGRES_USER: devnotes_ci
+          POSTGRES_PASSWORD: ci-throwaway-not-a-secret
+          # phpunit.xml pins DB_DATABASE=devnotes_test, and tests/TestCase.php
+          # refuses to run against any database not named *_test.
+          POSTGRES_DB: devnotes_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devnotes_ci -d devnotes_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # phpunit.xml pins only the driver and database name; host, port and
+    # credentials come from here. No APP_KEY or .env needed (see the
+    # 2026-09-23 runbook entry).
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_USERNAME: devnotes_ci
+      DB_PASSWORD: ci-throwaway-not-a-secret
+
+    defaults:
+      run:
+        working-directory: backend
+
     steps:
+      - uses: actions/checkout@v7
+
+      # Third-party action, so pinned to a commit SHA rather than a movable tag.
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: '8.4'
+          # Same set the dev/prod images compile in: pdo_pgsql for the test
+          # database, gd (JPEG/PNG/WebP) and exif for ImageUploadTest.
+          extensions: pdo_pgsql, gd, exif
+          coverage: none
+          tools: composer:v2
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+
+      - run: php artisan test
+
+  deploy:
+    # A failing (or cancelled) test job means this job is skipped entirely.
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Serialises deploys: never two deploy.sh runs on the Droplet at once, and
+    # never cancel one mid-run (killing the SSH session could interrupt
+    # `docker compose up --build` halfway).
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+
+    steps:
+      # deploy.sh deploys whatever main is at `git pull` time, not the commit
+      # this run tested. If main has moved on, a newer run is testing that
+      # commit and will deploy it if it passes — deploying from here would ship
+      # it untested. A window of a few seconds remains between this check and
+      # the server's pull; see the runbook's "CI Test Gate" entry (open item).
+      - name: Check this run is still the latest commit on main
+        id: latest
+        run: |
+          head_sha=$(git ls-remote https://github.com/${{ github.repository }} refs/heads/main | cut -f1)
+          if [ -z "$head_sha" ]; then
+            echo "::error::Could not read the current main SHA; refusing to deploy blind."
+            exit 1
+          fi
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "::notice title=Deploy skipped::main is now at $head_sha, which supersedes this run's $GITHUB_SHA. The newer run will test and deploy it."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Holds DEPLOY_SSH_KEY, so pinned to the commit SHA of the same v1.0.3
+      # release this workflow already used — deliberately not upgraded.
       - name: Trigger deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+        if: steps.latest.outputs.deploy == 'true'
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
