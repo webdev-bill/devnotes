@@ -10,7 +10,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to Ubuntu 26 on
+    # 2026-10-19, and a runner change we didn't choose must never be able to
+    # block deploys. Moving to 26.04 is a deliberate future upgrade — bump both
+    # jobs together and watch the first run. See the runbook (2026-09-24,
+    # "Runner pin").
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     services:
@@ -77,7 +82,7 @@ jobs:
     # A failing (or cancelled) test job means this job is skipped entirely.
     needs: test
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned; see the test job's comment
     # Serialises deploys: never two deploy.sh runs on the Droplet at once, and
     # never cancel one mid-run (killing the SSH session could interrupt
     # `docker compose up --build` halfway).
