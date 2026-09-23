@@ -39,6 +39,7 @@ type: short description of what you did
 | `refactor` | Cleaned up code, no behavior change |
 | `style` | UI/CSS only |
 | `docs` | Documentation only |
+| `test` | Added or changed tests only |
 | `wip` | Not done yet, saving progress |
 
 **Be specific** — future-you (and anyone reviewing the repo) will thank you.
