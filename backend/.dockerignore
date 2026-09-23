@@ -6,3 +6,30 @@ storage/framework/sessions/*
 storage/framework/testing/*
 storage/framework/views/*
 storage/logs/*
+
+# Test-only. The prod image can't run these anyway (PHPUnit is require-dev),
+# so shipping them is pure dead weight. Also missing from the dev image's
+# baked-in copy, which doesn't matter: docker-compose.yml bind-mounts
+# ./backend over /var/www/html, so the dev container always sees the real
+# tests/ and phpunit.xml. CI runs tests on a plain runner checkout, not an
+# image, so it's unaffected too.
+tests/
+phpunit.xml
+.phpunit.result.cache
+
+# Repo, editor and build metadata — never read at runtime. (Docker still
+# reads the Dockerfiles and this file to run the build; excluding them only
+# keeps COPY . . from copying them into the image.)
+.git
+.gitignore
+.gitattributes
+.editorconfig
+.dockerignore
+Dockerfile
+Dockerfile.prod
+README.md
+# Dev setup only: .env.example seeds a local .env (`composer setup`); prod
+# gets its env from docker-compose.prod.yml. .npmrc is scaffold debris —
+# the backend has no package.json.
+.env.example
+.npmrc
