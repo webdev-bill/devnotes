@@ -1,7 +1,7 @@
 # Development image only — runs Vite's dev server with hot module reload.
 # Not a production build (that would use a multi-stage build + a static
 # file server); we'll harden this later.
-FROM node:20-slim
+FROM node:24-slim
 
 WORKDIR /app
 

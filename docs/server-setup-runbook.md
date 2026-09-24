@@ -4762,3 +4762,84 @@ would tell an attacker exactly which patches the server has.
   an SSH config change: no new services, jobs or outbound dependencies.
 - **New attack surface:** none added, and some removed: root can no longer log in over
   SSH, and OS packages are patched to current.
+
+## 2026-09-24 — Frontend Build on Node 24, Lock File Regenerated with npm 11
+
+`node:20-slim` went end-of-life on 2026-04-30. Both frontend Dockerfiles (`Dockerfile.prod`'s
+build stage and the dev `Dockerfile`) now use `node:24-slim`, which is LTS until 2028-04-30.
+Moving to 26 after it becomes LTS (2026-10-28) should be a deliberate bump, like the runner pin.
+
+### Rule from now on: regenerate `package-lock.json` with npm 11 or newer
+
+**Always regenerate `frontend/package-lock.json` with npm 11+ (Node 24's bundled npm, or
+newer).** `npm ci` on npm 11 requires the lock to list the optional native bindings for
+*every* platform, not just the one it was generated on. A lock written by npm 10 lists only
+the generating platform's bindings, and npm 11's `npm ci` refuses it outright:
+`EUSAGE … Missing: @oxlint/binding-… / @rolldown/binding-…`. That was the first attempt at
+this bump, which failed and was reverted. The simplest safe way is inside the build image:
+
+```bash
+docker run --rm -v "$PWD":/app -w /app node:24-slim \
+  npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+```
+
+The regenerated lock still works under npm 10 (checked: the Node 20 image ran `npm ci`, the
+build and lint cleanly against it), so the rule is one-directional: npm 11 locks are fine
+everywhere, npm 10 locks break npm 11.
+
+### What the regeneration changed, checked by script rather than by eye
+
+`git diff --stat`: `frontend/package-lock.json | 640 +++`, insertions only. A Node script
+compared the old and new lock entry by entry:
+
+- **All 203 pre-existing package entries are byte-identical**: same `version`, `resolved`
+  and `integrity`, and no other field changed. The top-level fields and the root package
+  entry are unchanged. Nothing was removed.
+- **39 entries added, in two kinds**, and every one had to satisfy one of these rules
+  (anything else fails the check):
+  - **33 optional platform bindings:** `optional`, restricted by `os`/`cpu`, with a
+    `resolved` URL and `integrity`, and a version that satisfies an `optionalDependencies`
+    range declared by an existing, unchanged entry. That's 18 `@oxlint/binding-*`, 14
+    `@rolldown/binding-*` and `fsevents` (macOS only, declared by vite as `~2.3.3`).
+  - **6 bundled contents of an existing platform binding:** `@emnapi/core`,
+    `@emnapi/runtime`, `@emnapi/wasi-threads`, `@napi-rs/wasm-runtime`, `@tybys/wasm-util`
+    and `tslib`, nested under `@tailwindcss/oxide-wasm32-wasi` (optional, `cpu: wasm32`,
+    unchanged). They're `inBundle` with no `resolved` URL of their own: they ship inside that
+    package's tarball, and the old lock already named all six in its `bundleDependencies`.
+    npm 11 just writes them out as entries. They aren't platform bindings themselves, which
+    is why the check has a separate rule for them.
+- **The check can fail.** It was run against four tampered copies: one version changed, one
+  `resolved` URL pointed elsewhere, one non-optional package added, one entry removed. It
+  rejected all four.
+
+### Verification
+
+- **Prod build stage, no cache:** `npm ci` and `npm run build` passed on Node v24.21.0 /
+  npm 11.19.0, and `npm run lint` exited 0 (3 warnings, same as before). The lock inside the
+  image is identical to the repo's, so `npm ci` didn't rewrite it. Only the `linux-x64`
+  bindings are installed; none of the added macOS/Windows/wasm packages are.
+- **nginx smoke** (full prod image, browser UA): `/`, `/tools` and `/blog/some-post` return
+  200 with `index.html`; `/robots.txt` 200; a real hashed JS bundle 200
+  `application/javascript`; `/.env` 403. A bot UA on `/notes/1` returns 502 in this
+  standalone container, which is expected: it's dispatched to the backend, which the smoke
+  test doesn't run.
+- **Smoke-test gotcha:** plain `curl` sends no `Mozilla` token in its UA, so `nginx.conf`'s
+  fallback rule treats it as a link-preview bot and proxies SPA routes to the backend. In a
+  standalone frontend container that's a 502 on every route except real files, which looks
+  like a broken build. Smoke-test SPA routes with a browser UA (`curl -A 'Mozilla/5.0 …'`).
+- **Dev image:** `npm install` passes on Node 24, Vite 8.2.2 runs, and the lock is left
+  unchanged.
+- **Local gotcha:** the repo's `frontend/package-lock.json` on the dev machine was owned by
+  root, left by an earlier container run, so it couldn't be written in place. It was
+  replaced by rename (the directory is user-owned), which also gave it back normal
+  ownership.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none. No `package.json` change and no version change to any existing
+  lock entry. The 39 added lock entries are metadata for optional bindings of packages
+  already in the tree. Licenses per the lock's `license` fields: 38 MIT, 1 0BSD (`tslib`),
+  both permissive. None are installed on the Linux build.
+- **Cost/infra impact:** none at steady state. The next deploy rebuilds the frontend on the
+  new base image, as every deploy already does.
+- **New attack surface:** none added; this reduces it. The build no longer runs on an
+  unpatched, end-of-life Node.

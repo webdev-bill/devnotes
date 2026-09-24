@@ -3,7 +3,7 @@
 # them from a minimal nginx image, nothing else running in the container.
 
 # ---- Stage 1: build static assets ----
-FROM node:20-slim AS build
+FROM node:24-slim AS build
 
 WORKDIR /app
 COPY package*.json ./
