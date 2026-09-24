@@ -133,6 +133,8 @@ reboot
 **Still to do (next session):**
 - [x] Create a non-root user with sudo access — done 2026-08-27, see that
       session's log below
+- [x] Disable root SSH login — done 2026-09-24, see that date's server
+      maintenance entry below
 - [ ] Write docker-compose.yml (Laravel + React + Postgres)
 - [ ] Set up Traefik for reverse proxy + automatic HTTPS
 - [ ] Point Cloudflare DNS (A record) to the Droplet's IP
@@ -1040,9 +1042,12 @@ replace the existing `Host devnotes` SSH config entry) until that end-to-end che
 — only after confirming did the user update their own `~/.ssh/config` to make `devnotes`
 default to `andrew` rather than `root`.
 
-**Not done yet, on purpose:** root password/SSH login itself hasn't been disabled server-
+~~**Not done yet, on purpose:** root password/SSH login itself hasn't been disabled server-
 side. That's the natural next hardening step now that the `andrew` account is proven to
-work, not something to rush ahead of verification.
+work, not something to rush ahead of verification.~~
+**Update (2026-09-24): root SSH login is now disabled** (`PermitRootLogin no`). The user
+made and verified the change on the server. See the 2026-09-24 server maintenance entry
+at the end of this file.
 
 ## 2026-08-27 — Production Docker Compose + Traefik (Files Only, Not Deployed)
 
@@ -4689,3 +4694,71 @@ gated host code, and needs a session in which the user makes the server-side cha
 - **New attack surface:** none added, and some removed: the deploy key can no longer
   open port, agent or X11 forwarding channels. The SHA-pinned deploy, which *would* add
   a validated network input to the deploy path, was not built.
+
+## 2026-09-24 — Server Maintenance: Manual Backup, OS Upgrade + Reboot, Root SSH Login Disabled
+
+The user did all of this directly on the server. Claude Code only recorded it here.
+
+### Manual backup first
+
+- Ran `backup-db.sh` by hand before changing anything else. One new encrypted backup
+  (about 10 KB) confirmed present in the B2 backups bucket.
+- The previous newest backup was from 2026-08-29, so the database went about 26 days
+  without a backup. That's the cost of `backup-db.sh` having no schedule (see the
+  "Host-executed repo code" note above). Scheduling is still open on the "Still to do"
+  list at the top of this file.
+- Confirmed the backup encryption passphrase is stored off the server. Without it, none
+  of the backups can be restored.
+
+### Pre-reboot checks
+
+- All four containers have restart policy `unless-stopped`.
+- The Docker service is enabled at boot.
+
+So the stack comes back on its own after a reboot, without anyone running
+`docker compose up`.
+
+### OS upgrade and reboot
+
+```bash
+sudo apt update && sudo apt upgrade -y
+```
+
+- 24 packages upgraded and 6 newly installed (including a new kernel). 6 more were held
+  back by Ubuntu's phased updates.
+- Rebooted. Confirmed the server is running the newly installed kernel and the site
+  loads.
+
+### Root SSH login disabled
+
+This resolves the "Not done yet, on purpose" line in the 2026-08-27 non-root user entry.
+
+- Created a drop-in file, `/etc/ssh/sshd_config.d/01-no-root-login.conf`, containing
+  `PermitRootLogin no`. Using a drop-in instead of editing `sshd_config` itself keeps it
+  clear of packaged `sshd_config` updates (see the "keep the local version" prompt in
+  Step 6).
+- Validated the config with `sshd -t` before reloading `ssh`, so a typo couldn't lock
+  anyone out.
+- Verified three ways:
+  - `sshd -T` reports `permitrootlogin no` (the effective config, not just the file).
+  - `ssh devnotes whoami` still returns `andrew`.
+  - Logging in as root with the key is refused: `Permission denied (publickey)`.
+- Already off before this, and unchanged: password authentication and
+  keyboard-interactive authentication.
+- Deliberately unchanged: `AllowTcpForwarding` stays `yes` server-wide. The deploy key is
+  restricted separately by its own `authorized_keys` options (see the `restrict` change
+  in the entry above).
+
+### Left out of this entry on purpose
+
+This entry uses the same public-docs test as the earlier runbook audit (finding 3). The
+exact backup file name, the bucket name and the exact running kernel version aren't
+recorded. None of them helps a reader follow or repeat this work, and the kernel version
+would tell an attacker exactly which patches the server has.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none. Docs only, no manifests changed.
+- **Cost/infra impact:** none from the repo. The server work was OS package updates and
+  an SSH config change: no new services, jobs or outbound dependencies.
+- **New attack surface:** none added, and some removed: root can no longer log in over
+  SSH, and OS packages are patched to current.
