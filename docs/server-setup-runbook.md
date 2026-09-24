@@ -131,6 +131,13 @@ reboot
 - Waited ~30-60 seconds, reconnected with `ssh devnotes` — successful.
 
 **Still to do (next session):**
+- [ ] **PRIORITY: schedule `backup-db.sh`. Backups are not automatic.** Despite what
+      this runbook used to say, no backup schedule has ever existed on the server, and
+      DigitalOcean's own backups are off. Before the manual backup on 2026-09-24, the
+      newest backup was about 26 days old. Until this is done, a backup happens only
+      when someone runs the script by hand. It's gated host code, so it needs its own
+      session with the user making the server-side change, verified by a real
+      scheduled run. See the 2026-09-24 audit entry.
 - [x] Create a non-root user with sudo access — done 2026-08-27, see that
       session's log below
 - [x] Disable root SSH login — done 2026-09-24, see that date's server
@@ -142,7 +149,7 @@ reboot
       end-to-end 2026-08-27, see that session's log below
 - [x] Configure Postgres backups to S3-compatible storage (e.g. Backblaze B2) —
       done; encrypted B2 uploads verified, see the backup-db.sh section; scheduling
-      tracked separately below
+      is **not** done, see the priority item at the top of this list
 - [ ] Write DEPLOYMENT.md — a from-scratch rebuild guide
 - [ ] Add pagination controls to the notes list pages (`/notes` and `/my/notes`)
       — deliberately deferred in the 2026-08-26 notes/blog pages session, both
@@ -167,13 +174,15 @@ reboot
       ready, only started. `deploy.sh`'s health-check retry loop (added
       2026-08-27) papers over this at the deploy-script level; real
       healthchecks would fix it at the source instead
-- [ ] Schedule backup-db.sh (currently manual only); it's gated host code, so it
-      needs its own session with the user making the server-side change. Added
-      2026-09-24, see that date's "Host-executed repo code" note
 - [ ] Set up Dependabot for Docker base images (tags/digests in the Dockerfiles and
       compose files) and the SHA-pinned GitHub Actions, so pinned versions get
       proposed bumps instead of silently ageing. Added 2026-09-24, deliberately
       not set up yet
+- [ ] Stop recreating the frontend on every code deploy. `CACHEBUST=$NEW_SHA` reruns
+      the frontend build, and so recreates its container, on every new commit, even a
+      backend-only one, so public pages blip briefly. Options: re-bake the meta tags only
+      when site settings change, or a zero-downtime rollout. Goes with the healthchecks
+      item above. Added 2026-09-24
 
 ## Step 7 — Install Docker ✅ DONE
 
@@ -4939,3 +4948,123 @@ as `docker buildx version`, `docker compose version`, `docker info` and
 - **New attack surface:** none. `scripts/prod-compose.sh` is gated host code; the change
   only disables build metadata for images that never leave the host.
   `docker-compose.prod.yml` is unchanged.
+
+## 2026-09-24 — Repo and Public-Docs Audit: Findings, Remediation, and the Docs-Only Deploy Skip
+
+> **Most important finding: backups were not running.** Until 2026-09-24 this runbook said a
+> cron job ran `backup-db.sh` daily at 3am. It never did. A read-only check on the server
+> found no crontab for any user and no devnotes timer, and DigitalOcean's own backups are
+> disabled. Before the manual backup on 2026-09-24, the newest backup was from 2026-08-29,
+> **about 26 days with no backup at all, while the runbook claimed daily ones.** The runbook
+> is corrected, and scheduling is the **priority** item at the top of the "Still to do" list.
+> **It isn't fixed yet:** until it's scheduled and a scheduled run has been verified,
+> backups happen only when someone runs the script by hand.
+
+This session (2026-09-23 into 2026-09-24) audited the public repo, its history and this
+runbook for anything that helps an attacker, or is simply wrong, and then fixed what could
+be fixed from the repo. Claude Code did the audit and the repo changes; the user did every
+server-side step and approved each push of host-executed code.
+
+### Findings
+
+| # | Area | Finding | Outcome |
+|---|---|---|---|
+| 1 | Outside repo history | One exposure that rewriting history can't reach, because it isn't in the current history. Details are kept out of this public runbook on purpose. | User action with GitHub, out of band. The runbook's pointers to it were removed (A) |
+| 2 | **Backups** | **See the box above.** | Runbook corrected (A). **Scheduling still open, priority** |
+| 3 | Public docs | The runbook said root SSH login "hasn't been disabled". | **Fixed on the server** by the user, 2026-09-24 (maintenance entry above) |
+| 4 | `.gitignore` | Backups, dumps and key files in the repo root weren't ignored, though `restore-db.sh` expects a downloaded backup there. | **Fixed** (B, `38a8ac0`) |
+| 5 | Public docs | A personal display name was printed in the runbook. | **Fixed** (A, `5e8023f`) |
+| 6 | Public docs | The images bucket name was published. | **Fixed** (A). Both buckets being private is what actually matters |
+| 7 | Host scripts | `backup-db.sh` and `restore-db.sh` use `set -a; source .env.production`, which hands every production secret to every child process. | **C: on hold.** A least-privilege patch is sandbox-tested. It goes into the backup-scheduling session, because both need a real backup run on the server to verify |
+| 8–12 | History, metadata, CI logs, tracked files | gitleaks and a manual sweep over all history found no secrets; commit metadata is clean; deploy logs print nothing secret; nothing secret-shaped is tracked. | Fine |
+| 13 | `node:20-slim` | End-of-life since 2026-04-30. | **Fixed** (D, `f871bb1`): Node 24 plus a lock regenerated with npm 11. See the Node 24 entry above |
+| 14 | `composer:latest` | A floating tag in the stage that installs production dependencies. | **Fixed** (E, `f1833ff`): `composer:2` |
+| 15 | Deploys | Every deploy rebuilt and recreated containers, including docs-only ones, with a 502 on the first health-check attempt. | **Fixed** in two parts: G (`9c93d94`, verified on the server) and F (`8105aea`, below) |
+
+### F: skip the rebuild for docs-only deploys (`8105aea`)
+
+`deploy.sh` now records the last **successfully** deployed SHA in
+`~/.devnotes-last-deployed-sha` on the Droplet. That's outside the repo, written through a
+temp file plus `mv`, and only after the health check passes. If every path changed since
+that SHA is Markdown or under `docs/` or `blog/`, the deploy runs the health check, records
+the new SHA and exits, with no rebuild and no container recreate.
+
+- **Why not `OLD_SHA`:** `git pull` advances it even when the rest of the deploy then fails.
+  A failed code deploy followed by a docs-only commit would have skipped the rebuild and
+  left the failed change unbuilt.
+- **Migrations use the same base.** They had the same failure mode: after a failed deploy,
+  the next `OLD_SHA` already included the migration, so `migrate` would have been skipped
+  for good.
+- **Unknown state means a full deploy.** A missing, unreadable, malformed or non-ancestor
+  state file means a full rebuild plus `migrate --force`, which does nothing if no
+  migrations are pending.
+- **An empty diff still rebuilds.** An empty commit is how the baked meta tags get
+  refreshed. A same-SHA `workflow_dispatch` redeploy also does a full deploy, but it's
+  cached and does **not** re-fetch the tags.
+- **Why `.md` is safe to skip everywhere, not just in `docs/` and `blog/`:**
+  - Nothing in either build, or at runtime, reads a Markdown file: no `?raw` imports, no
+    glob imports, no file reads of `.md` anywhere.
+  - This was tested, not just read. With `frontend/README.md` changed, the frontend `dist/`
+    tree hash was identical. With `backend/README.md` changed, the backend image ID was
+    identical; `.dockerignore` already excludes that file.
+  - The top-level Markdown files, `docs/` and `blog/` are outside both build contexts. The
+    only repo file mounted at runtime is `traefik/dynamic.yml`.
+- **A real bug caught before it shipped.** The first proposal tested the file list with
+  `… | grep -q .` under `pipefail`. `grep -q` exits early, which can SIGPIPE the command
+  writing to it and flip the pipeline's result. On a 3,000-file code diff it misclassified
+  the deploy as docs-only in 30 of 30 runs. The shipped version captures the list first;
+  0 of 30. The old migration check had the same pattern and got the same fix.
+- **Sandbox:** 20 of 20 cases pass against the exact committed file. The sandbox has a fake
+  GitHub remote and server checkout, with only compose, `curl` and `sleep` stubbed. Cases
+  include the self-update, a failed build then a docs-only commit (rebuilds **and**
+  migrates), a failed health check then a docs-only commit, bad state files and the
+  3,000-file diff.
+- **Self-update transition:**
+  - The deploy of `8105aea` itself ran the old script: a full deploy, with no state file
+    written. Its run passed.
+  - The next deploy runs the new logic with the state unknown: a full rebuild,
+    `migrate --force`, and the state file gets written.
+  - Docs-only deploys after that should log
+    `Docs-only changes since last successful deploy — skipping rebuild.`
+  - **Still to confirm** from a real deploy log: the first real skip.
+
+### What went wrong / corrections
+
+- **An overstated claim, corrected before commit.** The previous report said all 39 lock
+  entries added by the npm 11 regeneration were optional platform bindings. A script check
+  showed 6 of them are bundled contents of an existing platform binding. Details are in the
+  Node 24 entry. The user accepted them as meeting the intent.
+- **The gitleaks hook was skipped for one commit.** `f871bb1` was committed from WSL's git.
+  In this checkout, `.githooks/pre-commit` is mode 644 on disk (the index has 755), and
+  `core.fileMode=false` in the shared `.git/config` hides that, so git skipped the hook
+  without a word. `gitleaks` also isn't on WSL's PATH (only `gitleaks.exe` is). The commit
+  was scanned afterwards with the Windows gitleaks and came back clean. Later commits were
+  made from Windows git, where the hook runs. A fix for both halves (making the hook
+  executable locally, plus a pinned, checksum-verified Linux gitleaks) is proposed and
+  waiting for approval.
+- **A comment error, caught by the server verification.** F's comment originally said a
+  `workflow_dispatch` redeploy refreshes the baked meta tags. The user's run #67 showed the
+  frontend stays `Running` on a same-SHA redeploy, so it can't. The comment was amended
+  before F was pushed.
+- **Smoke-test false alarm:** plain `curl` gets a 502 on SPA routes, because of the bot
+  dispatch. See the Node 24 entry.
+
+### Open items from this session
+
+- **Schedule backups: priority**, together with C, in one session with the user.
+- Fix the gitleaks hook in WSL (proposed, waiting for approval).
+- Confirm F's first real docs-only skip in a deploy log.
+- Backlog: stop recreating the frontend on every code deploy (added to "Still to do").
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none in any app manifest. D regenerated the lock with no version
+  changes; the added entries are 38 MIT and 1 0BSD, all permissive. E pins an existing
+  image.
+- **Cost/infra impact:** lower. G stops the needless backend recreate on every deploy, and
+  F makes docs-only deploys skip the rebuild on the $6 Droplet. Nothing new runs and no
+  outbound dependencies were added.
+- **New attack surface:** net reduction: an unpatched build runtime, a floating image tag
+  and a leak path for backup/key files are gone, and root SSH login is off. F adds one
+  state file in the deploy user's home. It's used only if it holds exactly 40 hex characters
+  that name an ancestor of the commit being deployed, anything else means a full deploy,
+  and it's never run as code. `docker-compose.prod.yml` is unchanged.
