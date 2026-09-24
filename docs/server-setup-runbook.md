@@ -168,6 +168,10 @@ reboot
 - [ ] Schedule backup-db.sh (currently manual only); it's gated host code, so it
       needs its own session with the user making the server-side change. Added
       2026-09-24, see that date's "Host-executed repo code" note
+- [ ] Set up Dependabot for Docker base images (tags/digests in the Dockerfiles and
+      compose files) and the SHA-pinned GitHub Actions, so pinned versions get
+      proposed bumps instead of silently ageing. Added 2026-09-24, deliberately
+      not set up yet
 
 ## Step 7 — Install Docker ✅ DONE
 
