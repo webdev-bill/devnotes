@@ -3,7 +3,7 @@
 # bakes the application code into the image; nothing is bind-mounted.
 
 # ---- Stage 1: install PHP dependencies with dev tooling excluded ----
-FROM composer:latest AS vendor
+FROM composer:2 AS vendor
 
 WORKDIR /app
 COPY composer.json composer.lock ./
