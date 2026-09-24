@@ -17,4 +17,10 @@ set -euo pipefail
 #        scripts/prod-compose.sh exec backend php artisan tinker
 
 cd "$(dirname "$0")/.."
+# Images are built and run here, never pushed to a registry, so provenance
+# attestations add nothing. They also give every build, even a fully cached
+# one, a new image digest, so compose sees a "changed" image and recreates
+# the container on every deploy (the backend 502 during the health check).
+# Reproduced and confirmed locally 2026-09-24; see the runbook.
+export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 exec docker compose -f docker-compose.prod.yml --env-file .env.production "$@"

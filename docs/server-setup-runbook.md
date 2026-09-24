@@ -4843,3 +4843,85 @@ compared the old and new lock entry by entry:
   new base image, as every deploy already does.
 - **New attack surface:** none added; this reduces it. The build no longer runs on an
   unpatched, end-of-life Node.
+
+## 2026-09-24 — Backend Recreated on Every Deploy: Provenance Attestations
+
+> **Status: verified locally, unverified on the server.** The fix below is confirmed on a
+> local reproduction of the server's build path. It hasn't been confirmed on the Droplet
+> yet; see "Server verification" at the end.
+
+### Symptom
+
+Every deploy recreated the backend container, even when nothing in its build context
+changed. The deploy log for docs-only run 35899444150 showed
+`Container devnotes-backend-1 Recreate` / `Recreated` and
+`Health check attempt 1 failed (HTTP 502)`, even though every backend build step was
+`CACHED`.
+
+### Root cause: provenance attestations
+
+BuildKit attaches a provenance attestation to each image by default. That wraps the image
+in an OCI index along with an attestation manifest that records build metadata, so even a
+fully cached build produces a **new image ID**. Compose compares image IDs, sees a
+"changed" image and recreates the container. These images are built and run on the Droplet
+and never pushed to a registry, so the attestations do nothing useful here.
+
+### Fix
+
+`scripts/prod-compose.sh` exports `BUILDX_NO_DEFAULT_ATTESTATIONS=1` before
+`exec docker compose …`. Every production compose command goes through that wrapper,
+including manual ones, so every build is covered. The compose-file route,
+`build.provenance: false`, was rejected: local compose v2.35.1 errors on it
+("Additional property provenance is not allowed"), and the environment variable works
+whichever compose version is installed.
+
+### Local verification, on two build paths
+
+The server's deploy log warns
+`Docker Compose is configured to build using Bake, but buildx isn't installed`, so its
+build path differs from a normal local setup. Both paths were tested with the real
+`docker-compose.prod.yml`, building the backend twice with no changes in between:
+
+| Build path | Setting | Image ID across 2 cached builds | Second `up --build` |
+|---|---|---|---|
+| Local compose v2.35.1 with buildx | default | changes (OCI index + attestation) | `Recreate` |
+| Local compose v2.35.1 with buildx | `BUILDX_NO_DEFAULT_ATTESTATIONS=1` | identical (plain manifest) | `Running` |
+| **Compose v2.40.3, buildx removed** (the server's path) | default | changes (`…0af401f8` → `…c6704030`), OCI index | `Recreate` |
+| **Compose v2.40.3, buildx removed** (the server's path) | `BUILDX_NO_DEFAULT_ATTESTATIONS=1` | identical (`…b23b6820`), plain v2 manifest | `Running` |
+
+The v2.40.3 run printed the same "Bake, but buildx isn't installed" warning as the server
+log, so it went through the same fallback build path. It ran in a throwaway `docker:cli`
+container with the buildx plugin deleted and the official v2.40.3 compose binary
+installed, against the local daemon.
+
+**What still differs from the server:** the daemon. Locally that's Docker Desktop's
+engine, not the Droplet's, and the image store or engine version could behave
+differently. That's why this is still unverified on the server.
+
+### Expected on the first deploy with this change
+
+The backend is **recreated once more**. The running backend image is the attested one, and
+the first un-attested build has a different ID, which is the transition, not a failure.
+The `v2.40.3` test showed exactly this: the first `up` after enabling the variable
+recreated.
+
+### Server verification (to do, by the user)
+
+After that first deploy, trigger a `workflow_dispatch` redeploy with no changes and read the
+deploy log:
+- `Container devnotes-backend-1 Running`: G works on the server.
+- `Recreate`: G doesn't work on the server's build path. Investigate that first, with
+  read-only checks such as `docker buildx version`, `docker compose version`,
+  `docker info` and `docker image inspect` of the backend image, before building anything
+  on top of it.
+
+The frontend is still recreated on every deploy, as before. `CACHEBUST` deliberately
+reruns its build to refresh the baked meta tags, so public pages still blip briefly.
+
+**Standing checklist** (per `CLAUDE.md`):
+- **New dependencies:** none. One environment variable in an existing script.
+- **Cost/infra impact:** a small reduction. Deploys stop recreating an unchanged backend,
+  and there's nothing new to run.
+- **New attack surface:** none. `scripts/prod-compose.sh` is gated host code; the change
+  only disables build metadata for images that never leave the host.
+  `docker-compose.prod.yml` is unchanged.
