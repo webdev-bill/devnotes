@@ -253,11 +253,11 @@ matter which shell touches the repo afterward:
 
 ```bash
 # checked on the Windows side first:
-git config user.name   # → Drew Swift
+git config user.name   # → <redacted-name>
 git config user.email  # → <redacted-personal-email>
 
 # then set locally (not --global) from WSL:
-git config user.name "Drew Swift"
+git config user.name "<redacted-name>"
 git config user.email "<redacted-personal-email>"
 ```
 
@@ -452,11 +452,11 @@ Checked git history three ways, cross-checking each against the others:
 - **Two real findings**, both self-introduced while writing the previous runbook entry
   (the git-identity session log): a personal Gmail address and a laptop hostname, quoted
   verbatim in `docs/server-setup-runbook.md` while documenting a `git config` command and
-  a git error message, in commit `f9941b0`.
+  a git error message, in the commit that logged that session.
 
 ### Remediation
 
-Since `f9941b0` was the current tip of `main` (not buried under later commits), fixing it
+Since that commit was the current tip of `main` (not buried under later commits), fixing it
 only required amending that one commit — not a multi-commit rebase like the earlier
 author-identity situation:
 
@@ -1749,7 +1749,11 @@ of recorded ownership.
   path doesn't branch on row count, so this is sufficient proof the mechanism itself works;
   it doesn't yet prove large/complex data survives the round trip, which the next real
   production backup will implicitly cover once there's real data to restore.
-- Cron installed for the `andrew` user (never root) for daily 3am backups.
+- ~~Cron installed for the `andrew` user (never root) for daily 3am backups.~~
+  **Correction (2026-09-24):** a read-only check on the server that day found no crontab
+  for `andrew` or `root`, and nothing devnotes-related in `/etc/cron.d` or the systemd
+  timers. So backups have been manual only, whatever this line originally recorded.
+  Scheduling is on the "Still to do" list at the top of this file.
 - Cleanup confirmed: the manually-downloaded `.gpg` file removed from the repo root
   afterward (it's untracked, but was sitting in the working tree), no leftover test
   containers.
@@ -1973,7 +1977,7 @@ markdown `![alt](url)`) on notes. Full route/schema/Intervention-config proposal
 reviewed and approved before any code was written, per the established
 propose-then-build workflow. Storage is Backblaze B2, via Laravel's `s3` flysystem
 driver pointed at B2's S3-compatible endpoint — a **separate bucket
-(`devnotes-images-webdevbill`) and separate application key** from the Postgres-backup
+(the images bucket) and separate application key** from the Postgres-backup
 bucket (see the 2026-08-30 entry above).
 
 ### Data model
@@ -2205,9 +2209,9 @@ build context was affected.)
 Add to `.env.production` (placeholders already in `.env.production.example`):
 
 ```
-B2_IMAGES_KEY_ID=<from the B2 console, for the devnotes-images-webdevbill bucket>
+B2_IMAGES_KEY_ID=<from the B2 console, for the images bucket>
 B2_IMAGES_APPLICATION_KEY=<same>
-B2_IMAGES_BUCKET=devnotes-images-webdevbill
+B2_IMAGES_BUCKET=<images bucket name>
 B2_IMAGES_BUCKET_ID=<from the B2 console — not consumed by the app, kept for reference>
 B2_IMAGES_REGION=<e.g. us-west-004 — must match the bucket's actual region>
 B2_IMAGES_ENDPOINT=<e.g. https://s3.us-west-004.backblazeb2.com — same region>
