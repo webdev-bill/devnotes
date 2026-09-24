@@ -4829,6 +4829,9 @@ compared the old and new lock entry by entry:
   like a broken build. Smoke-test SPA routes with a browser UA (`curl -A 'Mozilla/5.0 …'`).
 - **Dev image:** `npm install` passes on Node 24, Vite 8.2.2 runs, and the lock is left
   unchanged.
+- **On the server:** deployed with `f871bb1` (Actions run 35962026984, which passed; the SSH
+  deploy step ran). The user confirmed from a later deploy log that the frontend builds on
+  `node:24-slim`.
 - **Local gotcha:** the repo's `frontend/package-lock.json` on the dev machine was owned by
   root, left by an earlier container run, so it couldn't be written in place. It was
   replaced by rename (the directory is user-owned), which also gave it back normal
@@ -4846,9 +4849,8 @@ compared the old and new lock entry by entry:
 
 ## 2026-09-24 — Backend Recreated on Every Deploy: Provenance Attestations
 
-> **Status: verified locally, unverified on the server.** The fix below is confirmed on a
-> local reproduction of the server's build path. It hasn't been confirmed on the Droplet
-> yet; see "Server verification" at the end.
+> **Status: verified on the server (2026-09-24).** A no-change `workflow_dispatch` redeploy
+> left both containers `Running`. See "Server verification" at the end.
 
 ### Symptom
 
@@ -4894,9 +4896,9 @@ log, so it went through the same fallback build path. It ran in a throwaway `doc
 container with the buildx plugin deleted and the official v2.40.3 compose binary
 installed, against the local daemon.
 
-**What still differs from the server:** the daemon. Locally that's Docker Desktop's
-engine, not the Droplet's, and the image store or engine version could behave
-differently. That's why this is still unverified on the server.
+**What still differed from the server:** the daemon. Locally that was Docker Desktop's
+engine, not the Droplet's, which is why the local result alone didn't count as server
+verification.
 
 ### Expected on the first deploy with this change
 
@@ -4905,18 +4907,30 @@ the first un-attested build has a different ID, which is the transition, not a f
 The `v2.40.3` test showed exactly this: the first `up` after enabling the variable
 recreated.
 
-### Server verification (to do, by the user)
+### Server verification (done by the user)
 
-After that first deploy, trigger a `workflow_dispatch` redeploy with no changes and read the
-deploy log:
-- `Container devnotes-backend-1 Running`: G works on the server.
-- `Recreate`: G doesn't work on the server's build path. Investigate that first, with
-  read-only checks such as `docker buildx version`, `docker compose version`,
-  `docker info` and `docker image inspect` of the backend image, before building anything
-  on top of it.
+The fix deployed with `9c93d94` (Actions run 35962431348, which passed). The user then
+triggered a `workflow_dispatch` redeploy of the same SHA, run #67, and read its deploy log:
 
-The frontend is still recreated on every deploy, as before. `CACHEBUST` deliberately
-reruns its build to refresh the baked meta tags, so public pages still blip briefly.
+- `Container devnotes-backend-1 Running` and `Container devnotes-frontend-1 Running`: no
+  recreate.
+- No `exporting attestation manifest` line.
+- `Health check passed (attempt 1, HTTP 200)`: the first-attempt 502 is gone.
+
+The frontend also stayed `Running` because a same-SHA redeploy passes the same `CACHEBUST`
+value, so its build is fully cached too, and without attestations the image ID is unchanged.
+**A new commit still recreates the frontend:** `CACHEBUST` changes with every SHA and
+deliberately reruns its build to refresh the baked meta tags, so public pages still blip
+briefly on code deploys.
+
+**Consequence for meta-tag refreshes:** a same-SHA `workflow_dispatch` redeploy does **not**
+re-fetch SiteSettings, because `CACHEBUST` is unchanged and the build layer is cached. That was
+already the case before this fix. An **empty commit** is the way to refresh the baked tags, as
+`deploy.sh`'s `CACHEBUST` comment says.
+
+If this ever regresses (`Recreate` on a no-change redeploy), start with read-only checks such
+as `docker buildx version`, `docker compose version`, `docker info` and
+`docker image inspect` of the backend image.
 
 **Standing checklist** (per `CLAUDE.md`):
 - **New dependencies:** none. One environment variable in an existing script.
