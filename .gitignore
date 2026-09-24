@@ -2,6 +2,7 @@
 .env
 .env.production
 .env.*.local
+.env.local
 
 # --- Laravel (backend/) ---
 backend/vendor/
@@ -12,6 +13,20 @@ backend/bootstrap/cache/*
 # --- React / Node (frontend/) ---
 frontend/node_modules/
 frontend/dist/
+
+# --- Backups, dumps and key material (never commit, even encrypted) ---
+# restore-db.sh reads a manually downloaded backup from the repo root, and
+# gitleaks can't see inside an encrypted dump, so these are ignored by name.
+*.gpg
+*.dump
+*.dump.gz
+*.sql
+*.sql.gz
+!docker/postgres-init/*.sql
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # --- General ---
 .DS_Store
