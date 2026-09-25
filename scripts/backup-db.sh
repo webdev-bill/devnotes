@@ -7,10 +7,13 @@ cd "$(dirname "$0")/.."
 COMPOSE_FILE="docker-compose.prod.yml"
 ENV_FILE=".env.production"
 
-set -a
+# Sourced WITHOUT `set -a`: every value stays a plain shell variable, so no
+# child process (docker, gpg, b2, flock, date...) inherits the whole file in
+# its environment. Each command below is handed only what it needs:
+# docker compose reads the file itself via --env-file, gpg gets the
+# passphrase on an fd, and b2 gets its two key variables for its own run.
 # shellcheck disable=SC1091
 source "$ENV_FILE"
-set +a
 
 # Non-blocking: an overlapping run exits immediately with a clear log line
 # instead of queuing behind a slow/stuck previous run.
@@ -46,9 +49,11 @@ if ! docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" exec -T db \
 fi
 
 # The b2 CLI reads B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY from the
-# environment automatically (already exported above via `set -a`) — no
-# separate "b2 account authorize" step needed.
-if ! b2 file upload "$B2_BUCKET_NAME" "$BACKUP_PATH" "$BACKUP_NAME"; then
+# environment automatically, so no separate "b2 account authorize" step is
+# needed. The prefix assignments export them to this one b2 process only;
+# they're in its environment, not its argv, so they don't show in `ps`.
+if ! B2_APPLICATION_KEY_ID="$B2_APPLICATION_KEY_ID" B2_APPLICATION_KEY="$B2_APPLICATION_KEY" \
+    b2 file upload "$B2_BUCKET_NAME" "$BACKUP_PATH" "$BACKUP_NAME"; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) FAILED: upload of ${BACKUP_NAME} to B2 bucket ${B2_BUCKET_NAME}" >&2
   exit 1
 fi

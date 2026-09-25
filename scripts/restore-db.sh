@@ -31,10 +31,11 @@ cd "$(dirname "$0")/.."
 
 ENV_FILE=".env.production"
 
-set -a
+# Sourced WITHOUT `set -a`, so no child process inherits the whole file in
+# its environment: gpg gets the passphrase on an fd, and the b2 fallback
+# gets its two key variables for its own run. See backup-db.sh.
 # shellcheck disable=SC1091
 source "$ENV_FILE"
-set +a
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -47,7 +48,8 @@ if [ -f "$BACKUP_NAME" ]; then
 else
   DOWNLOAD_PATH="${TMP_DIR}/${BACKUP_NAME}"
   echo "${BACKUP_NAME} not found locally — downloading from B2 bucket ${B2_BUCKET_NAME}..."
-  b2 file download "b2://${B2_BUCKET_NAME}/${BACKUP_NAME}" "$DOWNLOAD_PATH"
+  B2_APPLICATION_KEY_ID="$B2_APPLICATION_KEY_ID" B2_APPLICATION_KEY="$B2_APPLICATION_KEY" \
+    b2 file download "b2://${B2_BUCKET_NAME}/${BACKUP_NAME}" "$DOWNLOAD_PATH"
 fi
 
 echo "Decrypting..."
