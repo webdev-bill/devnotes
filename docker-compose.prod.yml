@@ -3,7 +3,17 @@
 # than an override.
 #
 # Usage (on the server, once deployed — NOT run by this repo automatically):
-#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#   ./scripts/prod-compose.sh up -d --build
+# Never run raw `docker compose -f docker-compose.prod.yml ...` on the server.
+# The wrapper supplies --env-file .env.production. Without it, every ${VAR}
+# used to silently become blank (DOMAIN, APP_KEY, DB credentials), which
+# caused two real outages (runbook: Gap 2 on 2026-09-01, and 2026-11-22).
+#
+# Required variables are therefore written ${VAR:?message}: if one is unset
+# OR empty, every compose command on this file (up, config, ps, logs, exec,
+# down...) exits with an error before touching anything. Optional ones use
+# ${VAR:-default}. Any new variable this file needs must use one of the two
+# forms. A bare ${VAR} brings back the silent-blank failure.
 #
 # Prerequisite this file can't enforce: ufw must allow 80/tcp and 443/tcp on
 # the Droplet (only OpenSSH is allowed by default from initial hardening).
@@ -23,7 +33,7 @@ services:
       - --entrypoints.web.http.redirections.entryPoint.scheme=https
       - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
       - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
-      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set it in .env.production - run via scripts/prod-compose.sh}
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       # File provider, alongside the Docker provider above — for config that
       # isn't naturally per-container (the security-headers middleware
@@ -54,23 +64,22 @@ services:
       dockerfile: Dockerfile.prod
     restart: unless-stopped
     environment:
-      APP_NAME: ${APP_NAME}
+      APP_NAME: ${APP_NAME:?set it in .env.production - run via scripts/prod-compose.sh}
       APP_ENV: production
       APP_DEBUG: 'false'
-      APP_URL: https://${DOMAIN}
-      APP_KEY: ${APP_KEY}
+      APP_URL: https://${DOMAIN:?set it in .env.production - run via scripts/prod-compose.sh}
+      APP_KEY: ${APP_KEY:?set it in .env.production - run via scripts/prod-compose.sh}
       DB_CONNECTION: pgsql
       DB_HOST: db
       DB_PORT: 5432
-      DB_DATABASE: ${DB_DATABASE}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      B2_IMAGES_KEY_ID: ${B2_IMAGES_KEY_ID}
-      B2_IMAGES_APPLICATION_KEY: ${B2_IMAGES_APPLICATION_KEY}
-      B2_IMAGES_BUCKET: ${B2_IMAGES_BUCKET}
-      B2_IMAGES_BUCKET_ID: ${B2_IMAGES_BUCKET_ID}
-      B2_IMAGES_REGION: ${B2_IMAGES_REGION}
-      B2_IMAGES_ENDPOINT: ${B2_IMAGES_ENDPOINT}
+      DB_DATABASE: ${DB_DATABASE:?set it in .env.production - run via scripts/prod-compose.sh}
+      DB_USERNAME: ${DB_USERNAME:?set it in .env.production - run via scripts/prod-compose.sh}
+      DB_PASSWORD: ${DB_PASSWORD:?set it in .env.production - run via scripts/prod-compose.sh}
+      B2_IMAGES_KEY_ID: ${B2_IMAGES_KEY_ID:?set it in .env.production - run via scripts/prod-compose.sh}
+      B2_IMAGES_APPLICATION_KEY: ${B2_IMAGES_APPLICATION_KEY:?set it in .env.production - run via scripts/prod-compose.sh}
+      B2_IMAGES_BUCKET: ${B2_IMAGES_BUCKET:?set it in .env.production - run via scripts/prod-compose.sh}
+      B2_IMAGES_REGION: ${B2_IMAGES_REGION:?set it in .env.production - run via scripts/prod-compose.sh}
+      B2_IMAGES_ENDPOINT: ${B2_IMAGES_ENDPOINT:?set it in .env.production - run via scripts/prod-compose.sh}
       # This service's environment: block is an explicit per-var allowlist,
       # not a passthrough of everything in .env.production — a var missing
       # here is simply never seen by the container, regardless of what's set
@@ -98,6 +107,11 @@ services:
         condition: service_healthy
     # No published port — only reachable through Traefik over the default
     # Compose network.
+    # This service must NEVER get a `ports:` mapping. Its nginx is
+    # internal-only, speaks HTTP/1.1 to Traefik, and is deliberately not
+    # hardened to face the internet (see the `http2 off;` note in
+    # backend/docker/nginx.conf and the 2026-11-22 runbook entry). Traefik is
+    # the only thing that should publish ports.
     labels:
       - traefik.enable=true
       # Extended (not a new router) to also match /storage — the `public`
@@ -108,7 +122,7 @@ services:
       # unpinned-vs-pinned priority bug already logged in
       # docs/server-setup-runbook.md — a second router here would need its
       # own priority to reason about instead.
-      - traefik.http.routers.backend.rule=Host(`${DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/storage`))
+      - traefik.http.routers.backend.rule=Host(`${DOMAIN:?set it in .env.production - run via scripts/prod-compose.sh}`) && (PathPrefix(`/api`) || PathPrefix(`/storage`))
       # Explicit priority on BOTH routers (see frontend below), not just this
       # one — Traefik uses higher-number-wins, and mixing one explicit value
       # with the other router's auto-computed (rule-string-length-based)
@@ -135,24 +149,32 @@ services:
         # this has to be a build arg — setting it as a plain runtime
         # environment: value here would do nothing, there's no Node process
         # left at runtime to read it.
-        VITE_API_URL: ${VITE_API_URL}
+        VITE_API_URL: ${VITE_API_URL:?set it in .env.production - run via scripts/prod-compose.sh}
         # Absolute production URL for the "prebuild" static-meta-tag
         # injection step (frontend/scripts/inject-meta.mjs) to fetch
         # SiteSettings from during the image build — reuses DOMAIN, already
         # defined in .env.production for Traefik's routing rule below, so
         # this needs no new .env entry.
-        SITE_BASE_URL: https://${DOMAIN}
+        SITE_BASE_URL: https://${DOMAIN:?set it in .env.production - run via scripts/prod-compose.sh}
         # Cache-buster: forces the build layer that fetches SiteSettings to
         # actually re-run every deploy instead of Docker reusing a stale
         # cached `npm run build` layer (see Dockerfile.prod). deploy.sh
         # exports this as the new commit SHA before calling `up --build`.
-        CACHEBUST: ${CACHEBUST}
+        # Defaults to 0 (the Dockerfile's own default) so manual commands,
+        # which don't set it, print no "variable is not set" warning: a
+        # harmless warning on every run trains people to ignore real ones.
+        CACHEBUST: ${CACHEBUST:-0}
     restart: unless-stopped
     depends_on:
       - backend
+    # No published port, and this service must NEVER get a `ports:` mapping.
+    # Its nginx is internal-only, speaks HTTP/1.1 to Traefik, and is
+    # deliberately not hardened to face the internet (see the `http2 off;`
+    # note in frontend/nginx.conf and the 2026-11-22 runbook entry). Traefik
+    # is the only thing that should publish ports.
     labels:
       - traefik.enable=true
-      - traefik.http.routers.frontend.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.frontend.rule=Host(`${DOMAIN:?set it in .env.production - run via scripts/prod-compose.sh}`)
       - traefik.http.routers.frontend.priority=1
       - traefik.http.routers.frontend.entrypoints=websecure
       - traefik.http.routers.frontend.tls.certresolver=letsencrypt
@@ -163,16 +185,16 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_DATABASE}
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE:?set it in .env.production - run via scripts/prod-compose.sh}
+      POSTGRES_USER: ${DB_USERNAME:?set it in .env.production - run via scripts/prod-compose.sh}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set it in .env.production - run via scripts/prod-compose.sh}
     volumes:
       - db_data:/var/lib/postgresql/data
     # Deliberately no ports: mapping — unlike dev, Postgres has no business
     # being reachable from the public internet, even password-protected.
     # Only the backend container can reach it, over the Docker network.
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}']
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME:?set it in .env.production - run via scripts/prod-compose.sh} -d ${DB_DATABASE:?set it in .env.production - run via scripts/prod-compose.sh}']
       interval: 5s
       timeout: 5s
       retries: 5
