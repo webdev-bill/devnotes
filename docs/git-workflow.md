@@ -5,6 +5,11 @@
 - **`main`** — the only branch. Solo project, no team to protect from broken work-in-progress,
   so a dev/main split adds overhead without real benefit here. Revisit this if the project
   ever gets collaborators.
+- **Exception: `precheck/<topic>`**. This is a short-lived branch, used only when a change
+  touches required env vars in `docker-compose.prod.yml`. It lets the new compose file be
+  checked on the server before `main` deploys it. Push it, run the server check,
+  fast-forward `main`, push, then delete the branch. The full procedure is in
+  `docs/server-setup-runbook.md`, 2026-11-22, "Pre-deploy check for compose changes".
 
 ## Daily Routine
 

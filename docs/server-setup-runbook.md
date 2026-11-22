@@ -138,6 +138,12 @@ reboot
       when someone runs the script by hand. It's gated host code, so it needs its own
       session with the user making the server-side change, verified by a real
       scheduled run. See the 2026-09-24 audit entry.
+- [ ] Make `docker-compose.prod.yml` fail loudly on missing required variables
+      (`${VAR:?message}`), so a raw `docker compose` command without
+      `--env-file` errors out instead of blanking `DOMAIN`, `APP_KEY` and the DB
+      credentials. That has happened twice (Gap 2, 2026-09-01, and 2026-11-22).
+      Built and validated locally 2026-11-22. **Not deployed yet:** waiting for
+      the server-side pre-deploy check in that date's entry.
 - [x] Create a non-root user with sudo access — done 2026-08-27, see that
       session's log below
 - [x] Disable root SSH login — done 2026-09-24, see that date's server
@@ -5068,3 +5074,222 @@ the new SHA and exits, with no rebuild and no container recreate.
   state file in the deploy user's home. It's used only if it holds exactly 40 hex characters
   that name an ancestor of the commit being deployed, anything else means a full deploy,
   and it's never run as code. `docker-compose.prod.yml` is unchanged.
+
+---
+
+## 2026-11-22 — nginx HTTP/2 RCE Advisories: Not Exposed, Images Rebuilt, Raw-Compose Incident
+
+On 2026-11-18 nginx disclosed **CVE-2026-123007** and **CVE-2026-123633**: critical,
+unauthenticated remote code execution. Both need HTTP/2 enabled in nginx, and both are
+fixed in nginx **1.30.7** (stable) and **1.31.9** (mainline). DigitalOcean emailed every
+Droplet customer about them.
+
+### Assessment: devnotes was not exposed
+
+- **Traefik is the only container that publishes ports**, and it's the one that
+  terminates TLS and speaks HTTP/2 to clients. Traefik v3 is written in Go and doesn't
+  contain nginx code, so it isn't affected.
+- **Both nginx instances are internal-only.** `frontend/nginx.conf` (port 80, in
+  `nginx:alpine`) and `backend/docker/nginx.conf` (port 8000, Debian's nginx package in
+  `php:8.4-fpm`) publish no ports, had no `http2` directive (so HTTP/2 was off by
+  default), and receive only HTTP/1.1 from Traefik over the Compose network.
+
+### Remediation and verification (done by the user, 2026-11-22)
+
+- Rebuilt both images with `--pull --no-cache` through `./scripts/prod-compose.sh`.
+- **Frontend:** `nginx/1.31.9`, the patched mainline release.
+- **Backend:** `nginx -v` still reports **1.26.3**, but `dpkg -l nginx` shows
+  **`1.26.3-3+deb13u11`**. The Debian security tracker lists that build as the trixie fix
+  (DSA-6642-1). Debian backports the patch and keeps the upstream version number, so
+  `nginx -v` alone looks unpatched when it isn't. See lesson (a).
+- Homepage and `/api/notes` both returned 200 afterwards.
+
+### Repo hardening (Claude Code, this session)
+
+- **`http2 off;` set explicitly** in the server block of both nginx configs, with a comment
+  that this nginx is internal-only behind Traefik, HTTP/2 belongs at the edge, and it must
+  stay off here (citing both CVEs). It doesn't change behaviour, since HTTP/2 was already
+  off by default. It makes that a deliberate, visible decision, so any change that turns
+  HTTP/2 on has to delete a line that explains why it's off. The standalone `http2`
+  directive needs nginx 1.25.1 or newer; both images qualify (1.26.3 and 1.31.x).
+- **`docker-compose.prod.yml`:** a comment on both `frontend` and `backend` says they must
+  never get a `ports:` mapping. Comments only, so no change to the running stack.
+- **`docker-compose.prod.yml` refuses to run with a missing required variable.** See
+  lesson (b) for why. Details:
+  - **Required, written `${VAR:?set it in .env.production - run via scripts/prod-compose.sh}`
+    at every reference** (environment, Traefik labels and command, the db healthcheck):
+    `DOMAIN`, `ACME_EMAIL`, `APP_NAME`, `APP_KEY`, `DB_DATABASE`, `DB_USERNAME`,
+    `DB_PASSWORD`, `VITE_API_URL`, `B2_IMAGES_KEY_ID`, `B2_IMAGES_APPLICATION_KEY`,
+    `B2_IMAGES_BUCKET`, `B2_IMAGES_REGION`, `B2_IMAGES_ENDPOINT`. `:?` rejects empty
+    as well as unset, because blank is exactly the failure being prevented.
+  - **Optional, with defaults:** `CACHEBUST` is now `${CACHEBUST:-0}` (the Dockerfile's own
+    default), so manual commands print no "variable is not set" warning. A harmless
+    warning on every run trains people to ignore the real ones. `LOG_*` keep their existing
+    defaults.
+  - **`B2_IMAGES_BUCKET_ID` removed** from the backend's `environment:` block. Nothing in
+    the app reads it (the S3 driver takes the bucket name). `.env.production.example`
+    keeps the line, marked reference-only.
+  - **The compose file's header** now says never to run raw `docker compose`, and that
+    every new variable must use `:?` or `:-default`, never a bare `${VAR}`.
+  - **`.env.production.example`:** the `APP_KEY` bootstrap used to be
+    `docker compose -f docker-compose.prod.yml run --rm backend php artisan key:generate --show`.
+    That's a raw compose command (the Gap 2 shape), and it would now fail anyway, because
+    `APP_KEY` is still empty at that point. It's replaced with
+    `echo "base64:$(openssl rand -base64 32)"`, which the user runs on the server
+    themselves.
+  - **What else this affects:**
+    - **`deploy.sh`:** unaffected. It uses the wrapper and exports `CACHEBUST`.
+    - **`backup-db.sh`:** unaffected. It calls compose with `--env-file`, but Compose
+      checks the whole file even for `exec db`, so every required variable must be set.
+    - **`restore-db.sh`:** unaffected. It never uses compose.
+    - **GitHub Actions:** unaffected. The workflow never runs compose; it only triggers
+      the SSH forced command.
+  - **In an emergency without the env file,** every compose subcommand refuses to run,
+    including `ps`, `logs` and `down`. That's intended. Plain `docker ps`, `docker logs`
+    and `docker stop` still work.
+
+### Local verification
+
+- **`config` validation with a dummy env file.** The file is kept in the session scratchpad,
+  not the repo: every required variable has a placeholder, and `APP_KEY=dummy-not-a-key`.
+  Both checks used the new compose file from a `git archive` snapshot of the working tree:
+  - `docker compose -f docker-compose.prod.yml --env-file <dummy> config --quiet` exited
+    **0** with **no warnings**. The rendered output showed
+    ``Host(`example.test`)`` on both routers, `CACHEBUST: "0"`, and the healthcheck as
+    `pg_isready -U dummy -d dummy`.
+  - With `DOMAIN=` blanked, it exited **1**: `error while interpolating
+    services.backend.labels.[]: required variable DOMAIN is missing a value: set it in
+    .env.production - run via scripts/prod-compose.sh`.
+  - The raw Gap 2 command, with no `--env-file`, exited **1**: `required variable
+    DB_DATABASE is missing a value: ...`. Before this change, that command ran with blanks.
+  - A throwaway compose file confirmed that `ps`, `logs`, `exec` and `down` fail the same
+    way as `config`.
+- **`nginx -t` was not run locally.** Docker Desktop on the laptop stopped being able to
+  start containers (`docker info` answered, `docker run --rm hello-world` hung with no
+  output). That happened on 2026-11-22 and again on 2026-11-23, after a full
+  `wsl --shutdown`. See "Server verification" below.
+
+### Server verification (nginx configs and compose check)
+
+Local Docker was unavailable, so verification moved to the server. The user ran a one-off
+script by hand from `~/devnotes`, with nothing checked out (the working tree stayed on
+`main`). It read `frontend/nginx.conf`, `backend/docker/nginx.conf` and
+`docker-compose.prod.yml` from `origin/precheck/compose-required-vars` with `git show`, and
+tested them in throwaway `docker run --rm` containers on matching nginx versions:
+
+- **Frontend:** `nginx:alpine`, the same base image the frontend builds from. The conf was
+  mounted read-only as `conf.d/default.conf`, which is where `frontend/Dockerfile.prod`
+  puts it.
+- **Backend:** the official `nginx:1.26` image, mounted the same way. The real image uses
+  Debian trixie's nginx package (1.26.3) from `sites-enabled/default`. The official image
+  has no `sites-enabled`, but both paths are included inside the same `http {}` block, and
+  the directive set is the same across 1.26.x. `include fastcgi_params` resolves in both
+  images, and `fastcgi_pass 127.0.0.1:9000` is an IP literal, so no PHP-FPM is needed.
+- **Compose:** the branch's `docker-compose.prod.yml` through
+  `docker compose -f - --env-file .env.production config --quiet`, as described in the
+  pre-deploy check below.
+
+SERVER_VERIFICATION_PLACEHOLDER
+
+### Pre-deploy check for compose changes (run on the server, before deploying)
+
+**Running `./scripts/prod-compose.sh config` against the server's current checkout proves
+nothing about a pending change.** It validates the old compose file the server already has.
+The check has to read the new file from git, without checking it out:
+
+**Use this procedure only when a change touches required env vars**, meaning it adds,
+renames or removes a `${VAR:?...}`, or adds a variable to the compose file at all.
+Every push to `main` triggers `deploy.yml`, so the new file can't be checked through
+`origin/main` before it deploys: by the time `origin/main` has it, the deploy has already
+started. The check goes through a short-lived branch instead. `deploy.yml` triggers only on
+`main`, so that branch never deploys.
+
+1. **On the laptop,** commit the change on a branch named `precheck/<topic>` and push only
+   that branch:
+   `git push -u origin precheck/<topic>`.
+2. **If the change needs a new variable,** add it to `.env.production` on the server first.
+   The user does this by hand.
+3. **On the server, run:**
+
+   ```bash
+   cd ~/devnotes
+   git fetch -q origin precheck/<topic> && git show origin/precheck/<topic>:docker-compose.prod.yml | docker compose -f - --env-file .env.production config --quiet && echo OK
+   ```
+
+4. **Only after `OK` is printed,** fast-forward `main` to the checked commit, push it (this
+   deploys), and delete the branch:
+
+   ```bash
+   git switch main
+   git merge --ff-only precheck/<topic>
+   git push origin main
+   git push origin --delete precheck/<topic>
+   git branch -d precheck/<topic>
+   ```
+
+   `--ff-only` means `main` gets exactly the commit that was checked. If `main` has moved
+   in the meantime, the merge refuses. Then rebase the branch, push it again and repeat
+   step 3.
+
+This is a **deliberate, short-lived exception** to the single-`main`-branch rule in
+`docs/git-workflow.md`. The branch exists only between steps 1 and 4.
+
+**`:?` fails safely, so a missed check means a failed deploy, not an outage.** Compose
+interpolates the whole file before it does anything. If a required variable is missing,
+`./scripts/prod-compose.sh up -d --build` in `deploy.sh` exits 1 before it builds, creates
+or stops any container. `set -e` then stops the deploy, and the old containers keep
+serving. `git pull` has already moved the server's checkout, but the last-deployed-SHA
+state file isn't written, so the next deploy after the fix does a full rebuild. The
+workflow run fails and shows as red.
+
+- **`-f -` works here; tested locally:**
+  - Relative build contexts and the `./traefik/dynamic.yml` bind mount resolve against
+    the current directory, so run it from `~/devnotes`. The project name comes from that
+    directory too.
+  - `config --quiet` checks only interpolation, not whether build contexts exist.
+  - The dummy env file passed (exit 0), and a blank `DOMAIN` failed with the `:?` message.
+  - **It fails closed.** If `git show` fails (bad ref, not fetched), Compose gets empty
+    input, prints `empty compose file` and exits 1. `OK` is never printed.
+- **Prints nothing secret.** `config --quiet` prints nothing on success. The `:?` error
+  names the variable but never shows a value.
+
+### Incident during remediation: raw `docker compose` without `--env-file` (Gap 2 again)
+
+**This is a recurrence of "Gap 2" in the 2026-09-01 upload-limit entry.** The first
+rebuild and `up` commands were run as raw `docker compose -f docker-compose.prod.yml ...`
+with no `--env-file .env.production`. This time the commands came from a Claude chat
+session that didn't check whether `scripts/prod-compose.sh` existed.
+
+Compose substitutes an empty string for an undefined `${VAR}` without any error, so:
+
+- **`DOMAIN` was blank.** Traefik's router rules became ``Host(``)``, and the homepage
+  returned **404**.
+- **The backend restarted with a blank `APP_KEY` and blank DB credentials.**
+- **The frontend was rebuilt with a blank `VITE_API_URL`** baked into the bundle.
+- **The `db` container was recreated with blank credential variables, but the data was
+  safe.** The Postgres image reads `POSTGRES_*` only when it initializes an empty data
+  volume; `db_data` already existed, so nothing was re-initialized or changed.
+- **Traefik was not recreated.**
+
+**Fix:** rebuilt and ran `up -d` again through `./scripts/prod-compose.sh`, which brought
+every service back with the real values.
+
+**Why the wrapper didn't prevent it:** the wrapper only helps if it's used. Gap 2's fix made
+the *correct* command easy, but left the *wrong* command just as quiet as before. The
+compose file itself has to refuse to run with missing variables (lesson (b)).
+
+### Lessons
+
+**(a) A Debian-packaged nginx can carry a security fix without changing its version
+number.** Debian backports patches into its stable release and records them in the package
+revision (`-3+deb13u11`), not the upstream version (`1.26.3`). For the backend image, never
+judge patch status from `nginx -v`. Run `dpkg -l nginx` inside the container and compare
+the full package version against the Debian security tracker entry for the CVE (here,
+DSA-6642-1 for trixie). The frontend's `nginx:alpine` image tracks upstream mainline, so
+`nginx -v` is meaningful there.
+
+**(b) Raw `docker compose` on the server is never safe here.** Always use
+`scripts/prod-compose.sh`, including for "harmless" commands and including commands
+suggested by an AI chat session. Gap 2 (2026-09-01) and this incident are the same
+mistake twice. The `${VAR:?}` change above makes bypassing the wrapper **fail loudly,
+before anything is touched**, instead of quietly running with blanks.
