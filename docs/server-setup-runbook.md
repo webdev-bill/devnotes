@@ -138,12 +138,12 @@ reboot
       when someone runs the script by hand. It's gated host code, so it needs its own
       session with the user making the server-side change, verified by a real
       scheduled run. See the 2026-09-24 audit entry.
-- [ ] Make `docker-compose.prod.yml` fail loudly on missing required variables
+- [x] Make `docker-compose.prod.yml` fail loudly on missing required variables
       (`${VAR:?message}`), so a raw `docker compose` command without
       `--env-file` errors out instead of blanking `DOMAIN`, `APP_KEY` and the DB
       credentials. That has happened twice (Gap 2, 2026-09-01, and 2026-11-22).
-      Built and validated locally 2026-11-22. **Not deployed yet:** waiting for
-      the server-side pre-deploy check in that date's entry.
+      Done 2026-11-23: it passed the server precheck and was deployed in `5ccba5a`
+      (run #71). See the 2026-11-22 entry.
 - [x] Create a non-root user with sudo access — done 2026-08-27, see that
       session's log below
 - [x] Disable root SSH login — done 2026-09-24, see that date's server
@@ -5173,9 +5173,10 @@ Droplet customer about them.
 
 Local Docker was unavailable, so verification moved to the server. The user ran a one-off
 script by hand from `~/devnotes`, with nothing checked out (the working tree stayed on
-`main`). It read `frontend/nginx.conf`, `backend/docker/nginx.conf` and
-`docker-compose.prod.yml` from `origin/precheck/compose-required-vars` with `git show`, and
-tested them in throwaway `docker run --rm` containers on matching nginx versions:
+`main`). It fetched `precheck/compose-required-vars` and read `frontend/nginx.conf`,
+`backend/docker/nginx.conf` and `docker-compose.prod.yml` from it with `git show`. The
+version that ran read from `FETCH_HEAD`; see lesson (d). It then tested them in throwaway
+`docker run --rm` containers on matching nginx versions:
 
 - **Frontend:** `nginx:alpine`, the same base image the frontend builds from. The conf was
   mounted read-only as `conf.d/default.conf`, which is where `frontend/Dockerfile.prod`
@@ -5189,7 +5190,29 @@ tested them in throwaway `docker run --rm` containers on matching nginx versions
   `docker compose -f - --env-file .env.production config --quiet`, as described in the
   pre-deploy check below.
 
-SERVER_VERIFICATION_PLACEHOLDER
+**Precheck result: all 5 checks PASS on `5ccba5a`.** Run by the user, 2026-11-23:
+
+- Both the frontend and backend confs on the branch contain `http2 off;`.
+- **Frontend:** `nginx -t` OK on `nginx:alpine` (**nginx/1.31.9**).
+- **Backend:** `nginx -t` OK on `nginx:1.26` (**nginx/1.26.3**, the same upstream version
+  as Debian's package in production).
+- **Compose:** `config --quiet` OK with the branch's `docker-compose.prod.yml` and the
+  real `.env.production`. Every `:?` variable is set.
+
+**Deploy (2026-11-23):** `main` was fast-forwarded to exactly `5ccba5a` (`git merge
+--ff-only`) and pushed. That was the commit the precheck tested, with no other commit in
+between.
+
+- **GitHub Actions:** run **#71** (Test and Deploy, `5ccba5a`) was green in 2m 10s.
+- **Server checkout:** `git log -1` shows `5ccba5a`.
+- **`./scripts/prod-compose.sh ps`:** printed **no warnings at all**, which shows the
+  `:?` variables and the `CACHEBUST:-0` default both work. The deploy recreated
+  `frontend` and `backend`. `db` and `traefik` were untouched.
+- **Site:** the homepage and `/api/notes` both returned `HTTP/2 200`. That's HTTP/2 from
+  Traefik at the edge, as intended.
+- **Running config:** `nginx -T` in the running containers shows `http2 off;` at line 210
+  (frontend) and line 217 (backend).
+- **Login** on the live site works.
 
 ### Pre-deploy check for compose changes (run on the server, before deploying)
 
@@ -5293,3 +5316,16 @@ DSA-6642-1 for trixie). The frontend's `nginx:alpine` image tracks upstream main
 suggested by an AI chat session. Gap 2 (2026-09-01) and this incident are the same
 mistake twice. The `${VAR:?}` change above makes bypassing the wrapper **fail loudly,
 before anything is touched**, instead of quietly running with blanks.
+
+**(c) Don't paste multi-line scripts into an SSH session from Windows. Deliver them as a
+file.** The first precheck attempt pasted a long heredoc into the SSH session. The paste
+arrived scrambled and the `cd ~/devnotes` was skipped. The script's own "run from
+`~/devnotes`" guard caught it and stopped before doing anything, so nothing went wrong.
+From now on, copy the script up with `scp`, compare `sha256sum` on both ends, then run
+the file. Never paste it.
+
+**(d) Server scripts must not depend on the clone's remote-tracking setup.** The version
+of the precheck script that ran `cd`s to `~/devnotes` itself, so it doesn't depend on
+where it's started. It reads the branch from `FETCH_HEAD` after
+`git fetch origin <branch>`, not from `origin/<branch>`. So it works even if the server's
+clone only tracks `main`, in which case `origin/<branch>` would never be created.
